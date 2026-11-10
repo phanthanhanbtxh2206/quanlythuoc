@@ -38,7 +38,12 @@ export const BeneficiaryReportView: React.FC<BeneficiaryReportViewProps> = ({ in
     syncDocumentToDrive,
     templateSettings,
     exportFullGoogleSheetData,
+    hasPermission,
+    currentUser,
   } = useApp();
+
+  const canEditReport = hasPermission('canEditReport');
+  const canExportReport = hasPermission('canExportReport');
 
   // Danh sách đối tượng trích xuất trực tiếp từ các Phiếu Nhập Kho (mục phiếu nhập)
   const receiptBeneficiaries = useMemo(() => {
@@ -529,17 +534,27 @@ export const BeneficiaryReportView: React.FC<BeneficiaryReportViewProps> = ({ in
         {/* Action Buttons */}
         <div className="flex items-center gap-2 shrink-0">
           {/* Toggle Edit Mode */}
-          <button
-            onClick={() => setIsEditMode(!isEditMode)}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-              isEditMode
-                ? 'bg-amber-600 text-white shadow-xs'
-                : 'border border-amber-300 text-amber-800 bg-amber-50/60 hover:bg-amber-100'
-            }`}
-          >
-            <Edit3 className="w-3.5 h-3.5" />
-            <span>{isEditMode ? 'Đang Hiệu Chỉnh' : 'Bật Hiệu Chỉnh Biểu Mẫu'}</span>
-          </button>
+          {canEditReport ? (
+            <button
+              onClick={() => setIsEditMode(!isEditMode)}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                isEditMode
+                  ? 'bg-amber-600 text-white shadow-xs'
+                  : 'border border-amber-300 text-amber-800 bg-amber-50/60 hover:bg-amber-100'
+              }`}
+            >
+              <Edit3 className="w-3.5 h-3.5" />
+              <span>{isEditMode ? 'Đang Hiệu Chỉnh' : 'Bật Hiệu Chỉnh Biểu Mẫu'}</span>
+            </button>
+          ) : (
+            <span
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-slate-200 text-slate-400 bg-slate-50 cursor-not-allowed"
+              title={`Vai trò ${currentUser.role} không có quyền hiệu chỉnh số liệu báo cáo`}
+            >
+              <Edit3 className="w-3.5 h-3.5 text-slate-400" />
+              <span>Khóa Hiệu Chỉnh</span>
+            </span>
+          )}
 
           {isCustomized && (
             <button

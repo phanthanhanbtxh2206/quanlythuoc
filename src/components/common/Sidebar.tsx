@@ -4,7 +4,7 @@
  */
 
 import React from 'react';
-import { PackagePlus, PackageMinus, FileSpreadsheet, Sliders } from 'lucide-react';
+import { PackagePlus, PackageMinus, FileSpreadsheet, Sliders, Users, ShieldAlert } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 
 interface SidebarProps {
@@ -13,7 +13,9 @@ interface SidebarProps {
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => {
-  const { receipts, issues } = useApp();
+  const { receipts, issues, users, hasPermission } = useApp();
+
+  const pendingUsersCount = users.filter((u) => u.status === 'PENDING_APPROVAL').length;
 
   const menuItems = [
     {
@@ -37,10 +39,24 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
       icon: FileSpreadsheet,
     },
     {
+      id: 'users',
+      label: 'Phân Quyền & Cán Bộ',
+      fullLabel: 'Quản Lý Người Dùng & Vai Trò',
+      icon: Users,
+      badge: pendingUsersCount > 0 ? `${pendingUsersCount} chờ` : undefined,
+      badgeColor: pendingUsersCount > 0 ? 'bg-amber-500 text-slate-950 font-bold' : undefined,
+    },
+    {
       id: 'template-settings',
       label: 'Cấu Hình Mặc Định',
       fullLabel: 'Hiệu Chỉnh Biểu Mẫu Mặc Định',
       icon: Sliders,
+    },
+    {
+      id: 'audit',
+      label: 'Nhật Ký Kiểm Toán',
+      fullLabel: 'Giám Sát Truy Vết & Thao Tác',
+      icon: ShieldAlert,
     },
   ];
 

@@ -21,6 +21,9 @@ import {
   BeneficiaryReportRow,
   LotStock,
   UserRole,
+  UserStatus,
+  RolePermissions,
+  ROLE_PERMISSIONS,
   TemplateSettings,
   BackupLog,
 } from '../types';
@@ -83,11 +86,26 @@ interface AppContextType {
   exportFullGoogleSheetData: () => void;
   exportFullGoogleSheetCSV: () => void;
 
-  // User Actions
+  // User & Authentication Actions (RBAC)
+  isAuthenticated: boolean;
   setCurrentUser: (user: User) => void;
+  loginWithCredentials: (emailOrPhone: string, password?: string) => { success: boolean; error?: string };
+  logoutApp: () => void;
+  registerNewAccount: (data: {
+    email: string;
+    password?: string;
+    fullName: string;
+    department: string;
+    phone?: string;
+    role: UserRole;
+    autoApprove?: boolean;
+  }) => { success: boolean; message: string; user?: User };
+  hasPermission: (permission: keyof RolePermissions) => boolean;
   registerUser: (email: string, fullName: string, department: string, phone: string, requestedRole: UserRole) => void;
   approveUser: (userId: string, role: UserRole) => void;
   rejectUser: (userId: string) => void;
+  changeUserRole: (userId: string, role: UserRole) => void;
+  toggleUserStatus: (userId: string, status: UserStatus) => void;
 
   // Medicine Actions
   addMedicine: (medicine: Omit<Medicine, 'id' | 'createdAt'>) => Medicine;
@@ -162,6 +180,7 @@ const STORAGE_KEYS = {
   AUDIT_LOGS: 'btxh_audit_logs_v1',
   SYNCED_FILES: 'btxh_synced_files_v1',
   CURRENT_USER: 'btxh_current_user_v1',
+  IS_AUTHENTICATED: 'btxh_is_authenticated_v1',
   TEMPLATE_SETTINGS: 'btxh_template_settings_v1',
   BACKUP_LOGS: 'btxh_backup_logs_v1',
 };
@@ -221,6 +240,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     }
     return INITIAL_USERS[2]; // Default to Pharmacist DS. Lê Thu Hà
+  });
+
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => {
+    const saved = localStorage.getItem(STORAGE_KEYS.IS_AUTHENTICATED);
+    return saved !== null ? saved === 'true' : true;
   });
 
   const [beneficiaries, setBeneficiaries] = useState<Beneficiary[]>(() => {
@@ -350,6 +374,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(currentUser));
   }, [currentUser]);
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.IS_AUTHENTICATED, String(isAuthenticated));
+  }, [isAuthenticated]);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.BENEFICIARIES, JSON.stringify(beneficiaries));
@@ -751,20 +779,117 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
   };
 
-  // User Administration
-  const registerUser = (email: string, fullName: string, department: string, phone: string, requestedRole: UserRole) => {
+  // User Administration & RBAC Authentication
+  const loginWithCredentials = (emailOrPhone: string, password?: string): { success: boolean; error?: string } => {
+    const cleanInput = emailOrPhone.trim().toLowerCase();
+    const user = users.find(
+      (u) =>
+        (cleanInput === 'admin' && u.role === 'ADMIN') ||
+        u.email.toLowerCase() === cleanInput ||
+        u.email.toLowerCase().replace('@btxhdanang.gov.vn', '@btxh.danang.gov.vn') === cleanInput ||
+        u.email.toLowerCase().replace('@btxh.danang.gov.vn', '@btxhdanang.gov.vn') === cleanInput ||
+        (u.phone && u.phone.trim() === cleanInput) ||
+        u.fullName.toLowerCase() === cleanInput
+    );
+
+    if (!user) {
+      return { success: false, error: 'Không tìm thấy tài khoản với thông tin đăng nhập đã cung cấp.' };
+    }
+
+    if (user.status === 'PENDING_APPROVAL') {
+      return {
+        success: false,
+        error: 'Tài khoản đang chờ Ban Giám Đốc / Quản trị viên phê duyệt. Vui lòng liên hệ quản lý để kích hoạt.',
+      };
+    }
+
+    if (user.status === 'REJECTED' || user.status === 'DISABLED' || user.status === 'LOCKED') {
+      return {
+        success: false,
+        error: 'Tài khoản đã bị tạm dừng hoặc từ chối truy cập. Vui lòng liên hệ Quản trị viên hệ thống.',
+      };
+    }
+
+    // Verify password if set on user
+    if (user.password && password && user.password !== password) {
+      return { success: false, error: 'Mật khẩu không chính xác. Vui lòng kiểm tra lại.' };
+    }
+
+    setCurrentUser(user);
+    setIsAuthenticated(true);
+    addAuditLog('ĐĂNG_NHẬP', 'NGƯỜI_DÙNG', user.id, `Cán bộ ${user.fullName} (${user.role}) đăng nhập thành công`);
+    return { success: true };
+  };
+
+  const logoutApp = () => {
+    setIsAuthenticated(false);
+    addAuditLog('ĐĂNG_XUẤT', 'NGƯỜI_DÙNG', currentUser.id, `Cán bộ ${currentUser.fullName} đã đăng xuất khỏi phiên làm việc`);
+  };
+
+  const registerNewAccount = (data: {
+    email: string;
+    password?: string;
+    fullName: string;
+    department: string;
+    phone?: string;
+    role: UserRole;
+    autoApprove?: boolean;
+  }): { success: boolean; message: string; user?: User } => {
+    const existing = users.find(
+      (u) =>
+        u.email.toLowerCase() === data.email.trim().toLowerCase() ||
+        (data.phone && u.phone && u.phone.trim() === data.phone.trim())
+    );
+    if (existing) {
+      return { success: false, message: 'Email hoặc Số điện thoại này đã được đăng ký trong hệ thống.' };
+    }
+
     const newUser: User = {
       id: `usr-${Date.now()}`,
+      email: data.email.trim(),
+      password: data.password || '123',
+      fullName: data.fullName.trim(),
+      role: data.role,
+      status: data.autoApprove ? 'ACTIVE' : 'PENDING_APPROVAL',
+      department: data.department.trim(),
+      phone: data.phone?.trim() || '',
+      createdAt: getTodayISODate(),
+      approvedAt: data.autoApprove ? getTodayISODate() : undefined,
+      approvedBy: data.autoApprove ? 'Tự động duyệt / Admin' : undefined,
+    };
+
+    setUsers((prev) => [...prev, newUser]);
+    addAuditLog(
+      'ĐĂNG_KÝ',
+      'NGƯỜI_DÙNG',
+      newUser.id,
+      `Tài khoản mới ${newUser.fullName} (${newUser.role}) đăng ký ${data.autoApprove ? 'và được kích hoạt' : 'chờ duyệt'}`
+    );
+
+    return {
+      success: true,
+      message: data.autoApprove
+        ? 'Đăng ký thành công! Bạn có thể đăng nhập ngay bằng tài khoản này.'
+        : 'Đăng ký thành công! Hồ sơ đã được chuyển tới Ban Giám Đốc/Quản trị viên để phê duyệt cấp quyền.',
+      user: newUser,
+    };
+  };
+
+  const hasPermission = (permission: keyof RolePermissions): boolean => {
+    if (!currentUser || !currentUser.role) return false;
+    const permissions = ROLE_PERMISSIONS[currentUser.role];
+    return !!permissions?.[permission];
+  };
+
+  const registerUser = (email: string, fullName: string, department: string, phone: string, requestedRole: UserRole) => {
+    registerNewAccount({
       email,
       fullName,
-      role: requestedRole,
-      status: 'PENDING_APPROVAL',
       department,
       phone,
-      createdAt: getTodayISODate(),
-    };
-    setUsers((prev) => [...prev, newUser]);
-    addAuditLog('ĐĂNG_KÝ', 'NGƯỜI_DÙNG', newUser.id, `Tài khoản ${fullName} (${email}) đăng ký chờ duyệt`);
+      role: requestedRole,
+      autoApprove: false,
+    });
   };
 
   const approveUser = (userId: string, role: UserRole) => {
@@ -792,6 +917,35 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         if (u.id === userId) {
           const updated: User = { ...u, status: 'REJECTED' };
           addAuditLog('TỪ_CHỐI', 'NGƯỜI_DÙNG', u.id, `Từ chối cấp quyền tài khoản ${u.fullName}`);
+          return updated;
+        }
+        return u;
+      })
+    );
+  };
+
+  const changeUserRole = (userId: string, role: UserRole) => {
+    setUsers((prev) =>
+      prev.map((u) => {
+        if (u.id === userId) {
+          const updated: User = { ...u, role };
+          addAuditLog('PHÂN_QUYỀN', 'NGƯỜI_DÙNG', u.id, `Thay đổi vai trò của cán bộ ${u.fullName} thành ${role}`);
+          if (currentUser.id === userId) {
+            setCurrentUser(updated);
+          }
+          return updated;
+        }
+        return u;
+      })
+    );
+  };
+
+  const toggleUserStatus = (userId: string, status: UserStatus) => {
+    setUsers((prev) =>
+      prev.map((u) => {
+        if (u.id === userId) {
+          const updated: User = { ...u, status };
+          addAuditLog('TRẠNG_THÁI', 'NGƯỜI_DÙNG', u.id, `Đổi trạng thái tài khoản ${u.fullName} sang ${status}`);
           return updated;
         }
         return u;
@@ -1516,7 +1670,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         triggerAutoBackup,
         exportFullGoogleSheetData,
         exportFullGoogleSheetCSV,
+        isAuthenticated,
         setCurrentUser,
+        loginWithCredentials,
+        logoutApp,
+        registerNewAccount,
+        hasPermission,
+        changeUserRole,
+        toggleUserStatus,
         registerUser,
         approveUser,
         rejectUser,

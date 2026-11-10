@@ -30,8 +30,11 @@ export const TemplateSettingsView: React.FC = () => {
     resetTemplateSettings,
     triggerAutoBackup,
     backupLogs,
+    hasPermission,
+    currentUser,
   } = useApp();
 
+  const canManageSettings = hasPermission('canManageSettings');
   const [form, setForm] = useState<TemplateSettings>({ ...templateSettings });
   const [saveSuccess, setSaveSuccess] = useState(false);
 
@@ -67,23 +70,43 @@ export const TemplateSettingsView: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={handleReset}
-            className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-slate-300 hover:bg-slate-100 text-slate-700 text-xs font-semibold transition-colors"
-          >
-            <RotateCcw className="w-3.5 h-3.5" />
-            <span>Khôi phục mặc định</span>
-          </button>
-          <button
-            onClick={handleSave}
-            className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-teal-600 hover:bg-teal-700 text-white text-xs font-semibold shadow-xs transition-colors"
-          >
-            {saveSuccess ? <Check className="w-4 h-4 text-emerald-200" /> : <Save className="w-4 h-4" />}
-            <span>{saveSuccess ? 'Đã lưu cấu hình!' : 'Lưu cấu hình mặc định'}</span>
-          </button>
+          {canManageSettings ? (
+            <>
+              <button
+                type="button"
+                onClick={handleReset}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-slate-300 hover:bg-slate-100 text-slate-700 text-xs font-semibold transition-colors"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span>Khôi phục mặc định</span>
+              </button>
+              <button
+                onClick={handleSave}
+                className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-teal-600 hover:bg-teal-700 text-white text-xs font-semibold shadow-xs transition-colors"
+              >
+                {saveSuccess ? <Check className="w-4 h-4 text-emerald-200" /> : <Save className="w-4 h-4" />}
+                <span>{saveSuccess ? 'Đã lưu cấu hình!' : 'Lưu cấu hình mặc định'}</span>
+              </button>
+            </>
+          ) : (
+            <span
+              className="text-xs px-3 py-2 rounded-lg bg-slate-100 text-slate-500 border border-slate-200 cursor-not-allowed"
+              title="Chỉ Quản trị viên (ADMIN) mới có quyền lưu cấu hình"
+            >
+              Chế độ chỉ xem (Cần quyền ADMIN để lưu)
+            </span>
+          )}
         </div>
       </div>
+
+      {!canManageSettings && (
+        <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-amber-900 text-xs flex items-center gap-2">
+          <span className="font-semibold">Lưu ý phân quyền:</span>
+          <span>
+            Bạn đang đăng nhập với vai trò <strong>{currentUser.role}</strong>. Bạn có thể xem cấu hình nhưng không thể thay đổi thông tin mặc định của đơn vị.
+          </span>
+        </div>
+      )}
 
       {saveSuccess && (
         <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-900 rounded-lg text-xs flex items-center gap-2 shadow-2xs">

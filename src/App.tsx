@@ -4,7 +4,8 @@
  */
 
 import React, { useState } from 'react';
-import { AppProvider } from './context/AppContext';
+import { AppProvider, useApp } from './context/AppContext';
+import { AuthView } from './components/auth/AuthView';
 import { Header } from './components/common/Header';
 import { Sidebar } from './components/common/Sidebar';
 import { DashboardView } from './components/dashboard/DashboardView';
@@ -25,9 +26,14 @@ import { GoogleSyncGuidanceBar } from './components/sync/GoogleSyncGuidanceBar';
 import { TemplateSettingsView } from './components/settings/TemplateSettingsView';
 
 function MainApp() {
+  const { isAuthenticated } = useApp();
   const [activeTab, setActiveTab] = useState<string>('stock-receipts');
   const [reportBeneficiaryId, setReportBeneficiaryId] = useState<string | undefined>(undefined);
   const [dispensePrescriptionId, setDispensePrescriptionId] = useState<string | undefined>(undefined);
+
+  if (!isAuthenticated) {
+    return <AuthView />;
+  }
 
   const handleNavigateToReport = (benId: string) => {
     setReportBeneficiaryId(benId);

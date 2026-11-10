@@ -22,7 +22,13 @@ export const StockIssueListView: React.FC = () => {
     updateStockIssue,
     deleteStockIssue,
     getAvailableLots,
+    hasPermission,
+    currentUser,
   } = useApp();
+
+  const canCreateIssue = hasPermission('canCreateIssue');
+  const canEditIssue = hasPermission('canEditIssue');
+  const canDeleteIssue = hasPermission('canDeleteIssue');
 
   const [searchTerm, setSearchTerm] = useState('');
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -389,13 +395,28 @@ export const StockIssueListView: React.FC = () => {
 
           <button
             onClick={handleOpenCreateModal}
-            className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-teal-600 hover:bg-teal-700 text-white text-xs font-semibold shadow-xs transition-colors shrink-0"
+            disabled={!canCreateIssue}
+            title={canCreateIssue ? 'Lập phiếu xuất kho mới' : `Vai trò ${currentUser.role} không có quyền lập phiếu xuất kho`}
+            className={`flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold shadow-xs transition-colors shrink-0 ${
+              canCreateIssue
+                ? 'bg-teal-600 hover:bg-teal-700 text-white'
+                : 'bg-slate-200 text-slate-400 cursor-not-allowed'
+            }`}
           >
             <Plus className="w-4 h-4" />
             <span>Lập Phiếu Xuất Mới</span>
           </button>
         </div>
       </div>
+
+      {!canCreateIssue && (
+        <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-slate-600 text-xs flex items-center justify-between">
+          <span>
+            Chế độ <strong>Chỉ Xem & In Ấn</strong> (Vai trò: {currentUser.fullName} - {currentUser.role}). Bạn chỉ có thể tra cứu và in phiếu.
+          </span>
+          <span className="text-[11px] text-teal-700 font-semibold">Chỉ Dược sĩ, Bác sĩ & Admin có quyền lập phiếu xuất</span>
+        </div>
+      )}
 
       {/* Issues Table */}
       <div className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-2xs">
@@ -434,14 +455,24 @@ export const StockIssueListView: React.FC = () => {
                   </td>
                   <td className="py-3 px-4 text-center">
                     <div className="flex items-center justify-center gap-1.5">
-                      <button
-                        onClick={() => handleOpenEditModal(issue)}
-                        className="flex items-center gap-1 px-2.5 py-1 text-teal-700 hover:bg-teal-50 border border-teal-200 rounded-md text-2xs font-semibold transition-colors"
-                        title="Hiệu chỉnh nội dung phiếu xuất"
-                      >
-                        <Edit2 className="w-3.5 h-3.5" />
-                        <span>Hiệu chỉnh</span>
-                      </button>
+                      {canEditIssue ? (
+                        <button
+                          onClick={() => handleOpenEditModal(issue)}
+                          className="flex items-center gap-1 px-2.5 py-1 text-teal-700 hover:bg-teal-50 border border-teal-200 rounded-md text-2xs font-semibold transition-colors"
+                          title="Hiệu chỉnh nội dung phiếu xuất"
+                        >
+                          <Edit2 className="w-3.5 h-3.5" />
+                          <span>Hiệu chỉnh</span>
+                        </button>
+                      ) : (
+                        <span
+                          className="flex items-center gap-1 px-2 py-1 text-slate-400 border border-slate-200 rounded-md text-2xs cursor-not-allowed"
+                          title="Không có quyền chỉnh sửa phiếu xuất"
+                        >
+                          <Edit2 className="w-3.5 h-3.5" />
+                          <span>Khóa sửa</span>
+                        </span>
+                      )}
 
                       <button
                         onClick={() => setPrintDocument({ type: 'ISSUE', data: issue })}
@@ -451,13 +482,15 @@ export const StockIssueListView: React.FC = () => {
                         <Printer className="w-4 h-4" />
                       </button>
 
-                      <button
-                        onClick={() => handleDelete(issue)}
-                        className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-md transition-colors"
-                        title="Xóa phiếu xuất kho"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
+                      {canDeleteIssue && (
+                        <button
+                          onClick={() => handleDelete(issue)}
+                          className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-md transition-colors"
+                          title="Xóa phiếu xuất kho"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      )}
                     </div>
                   </td>
                 </tr>

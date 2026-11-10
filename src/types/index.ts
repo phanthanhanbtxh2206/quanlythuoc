@@ -10,6 +10,7 @@ export type UserStatus = 'PENDING_APPROVAL' | 'ACTIVE' | 'REJECTED' | 'LOCKED' |
 export interface User {
   id: string;
   email: string;
+  password?: string;
   fullName: string;
   role: UserRole;
   status: UserStatus;
@@ -19,6 +20,88 @@ export interface User {
   approvedAt?: string;
   approvedBy?: string;
 }
+
+export interface RolePermissions {
+  canCreateReceipt: boolean;
+  canEditReceipt: boolean;
+  canDeleteReceipt: boolean;
+  canCreateIssue: boolean;
+  canEditIssue: boolean;
+  canDeleteIssue: boolean;
+  canEditReport: boolean;
+  canExportReport: boolean;
+  canManageSettings: boolean;
+  canManageUsers: boolean;
+  canViewAudit: boolean;
+}
+
+export const ROLE_PERMISSIONS: Record<UserRole, RolePermissions> = {
+  ADMIN: {
+    canCreateReceipt: true,
+    canEditReceipt: true,
+    canDeleteReceipt: true,
+    canCreateIssue: true,
+    canEditIssue: true,
+    canDeleteIssue: true,
+    canEditReport: true,
+    canExportReport: true,
+    canManageSettings: true,
+    canManageUsers: true,
+    canViewAudit: true,
+  },
+  PHARMACIST: {
+    canCreateReceipt: true,
+    canEditReceipt: true,
+    canDeleteReceipt: true,
+    canCreateIssue: true,
+    canEditIssue: true,
+    canDeleteIssue: true,
+    canEditReport: true,
+    canExportReport: true,
+    canManageSettings: false,
+    canManageUsers: false,
+    canViewAudit: false,
+  },
+  DOCTOR: {
+    canCreateReceipt: false,
+    canEditReceipt: false,
+    canDeleteReceipt: false,
+    canCreateIssue: true,
+    canEditIssue: true,
+    canDeleteIssue: false,
+    canEditReport: false,
+    canExportReport: true,
+    canManageSettings: false,
+    canManageUsers: false,
+    canViewAudit: false,
+  },
+  ACCOUNTANT: {
+    canCreateReceipt: false,
+    canEditReceipt: false,
+    canDeleteReceipt: false,
+    canCreateIssue: false,
+    canEditIssue: false,
+    canDeleteIssue: false,
+    canEditReport: false,
+    canExportReport: true,
+    canManageSettings: false,
+    canManageUsers: false,
+    canViewAudit: false,
+  },
+  LEADER: {
+    canCreateReceipt: false,
+    canEditReceipt: false,
+    canDeleteReceipt: false,
+    canCreateIssue: false,
+    canEditIssue: false,
+    canDeleteIssue: false,
+    canEditReport: false,
+    canExportReport: true,
+    canManageSettings: false,
+    canManageUsers: false,
+    canViewAudit: true,
+  },
+};
 
 export interface Beneficiary {
   id: string;

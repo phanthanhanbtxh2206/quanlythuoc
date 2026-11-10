@@ -1,0 +1,981 @@
+# PROMPT TỔNG THỂ: XÂY DỰNG WEBAPP QUẢN LÝ THUỐC, NHẬP XUẤT KHO,
+# CẤP PHÁT THUỐC VÀ BÁO CÁO THEO ĐỐI TƯỢNG
+# NỀN TẢNG GOOGLE AI STUDIO
+
+I. VAI TRÒ VÀ MỤC TIÊU
+
+Bạn là một nhóm chuyên gia gồm:
+
+1. Kiến trúc sư phần mềm chuyên xây dựng ứng dụng web quản lý nghiệp vụ.
+2. Chuyên gia Google AI Studio, Gemini API, Google Sheets API và Google Drive API.
+3. Chuyên gia thiết kế cơ sở dữ liệu và quản lý kho thuốc.
+4. Chuyên gia phân tích nghiệp vụ quản lý thuốc tại cơ sở trợ giúp xã hội.
+5. Chuyên gia thiết kế biểu mẫu nhập kho, xuất kho và báo cáo thuốc.
+6. Chuyên gia UI/UX chuyên thiết kế ứng dụng quản lý thân thiện, dễ sử dụng.
+7. Chuyên gia bảo mật dữ liệu cá nhân và dữ liệu sức khỏe.
+8. Chuyên gia kiểm thử phần mềm, kiểm soát số liệu và tự động hóa quy trình.
+
+NHIỆM VỤ:
+
+Phân tích, thiết kế và xây dựng một WEBAPP QUẢN LÝ THUỐC TOÀN DIỆN phục vụ công tác quản lý thuốc tại Trung tâm Bảo trợ xã hội Đà Nẵng.
+
+Hệ thống phải quản lý xuyên suốt:
+
+- Danh mục thuốc.
+- Hồ sơ đối tượng sử dụng thuốc.
+- Nguồn thuốc.
+- Nhà cung cấp.
+- Nhập kho.
+- Quản lý số lô và hạn sử dụng.
+- Theo dõi tồn kho.
+- Lập đơn thuốc.
+- Theo dõi cấp phát thuốc.
+- Xuất kho.
+- Quản lý chứng từ.
+- Báo cáo nhập, xuất, tồn thuốc theo đối tượng.
+- In phiếu nhập kho.
+- In phiếu xuất kho.
+- In báo cáo tổng hợp thuốc.
+- Lưu trữ PDF và các tệp liên quan trên Google Drive.
+- Quản lý tài khoản, phê duyệt người dùng và phân quyền.
+- Đồng bộ dữ liệu với Google Sheets.
+
+Đây phải là ứng dụng có khả năng vận hành thực tế, không chỉ là giao diện minh họa.
+
+II. YÊU CẦU NGHIÊN CỨU FILE EXCEL ĐÍNH KÈM
+
+Trước khi thiết kế cơ sở dữ liệu và viết mã nguồn, hãy nghiên cứu kỹ tệp Excel người dùng cung cấp.
+
+Tệp gồm 3 sheet:
+
+1. Sheet "nhập".
+2. Sheet "xuất".
+3. Sheet "báo cáo".
+
+Phải phân tích toàn bộ nội dung của từng sheet, bao gồm:
+
+- Tiêu đề.
+- Các trường dữ liệu.
+- Cách bố trí thông tin.
+- Cấu trúc bảng.
+- Các cột và dòng.
+- Công thức tính toán.
+- Mối liên hệ giữa các trường.
+- Thông tin cần nhập thủ công.
+- Thông tin có thể tự động kế thừa.
+- Thông tin có thể tự động tính toán.
+- Các nội dung cần hiển thị trên biểu mẫu in.
+- Các trường hợp có thể gây sai lệch số liệu.
+
+Không chỉ đọc tên cột hoặc một vài dòng đầu. Phải phân tích toàn bộ dữ liệu có trong cả 3 sheet.
+
+1. PHÂN TÍCH SHEET "NHẬP"
+
+Biểu mẫu hiện có thể hiện các nhóm thông tin:
+
+A. Thông tin đơn vị:
+- Đơn vị: TRUNG TÂM BẢO TRỢ XÃ HỘI.
+- Bộ phận: PHÒNG Y TẾ - PHCN.
+- Mã QHNS: 1041008.
+- Tên chứng từ: PHIẾU NHẬP KHO.
+
+B. Thông tin chứng từ:
+- Ngày nhập.
+- Số chứng từ.
+- Thông tin Nợ hoặc tài khoản kế toán nếu áp dụng.
+- Họ tên người giao.
+- Địa chỉ hoặc bộ phận giao.
+- Số hóa đơn.
+- Ngày hóa đơn.
+- Tên đơn vị phát hành hóa đơn.
+- Nội dung nhập kho.
+- Đối tượng liên quan đến lô thuốc mua ngoài.
+- Số chứng từ kèm theo.
+
+C. Bảng chi tiết thuốc:
+- Số thứ tự.
+- Tên thuốc, nhãn hiệu, quy cách và phẩm chất.
+- Mã số.
+- Đơn vị tính.
+- Số lượng theo chứng từ.
+- Số lượng thực nhập.
+- Đơn giá.
+- Thành tiền.
+
+D. Phần tổng hợp và ký xác nhận:
+- Thành tiền.
+- Tổng cộng.
+- Tổng số tiền bằng chữ.
+- Ngày lập.
+- Người giao hàng.
+- Thủ kho.
+- Kế toán trưởng.
+- Thủ trưởng đơn vị.
+
+YÊU CẦU:
+
+Giữ đầy đủ các thông tin nghiệp vụ cần thiết của mẫu phiếu nhập.
+
+Thiết kế giao diện nhập liệu sao cho người dùng không phải nhập lại các thông tin có thể lấy từ danh mục hoặc từ chứng từ liên quan.
+
+Ví dụ:
+- Tên thuốc được lấy từ danh mục thuốc.
+- Đơn vị tính được tự động điền.
+- Đơn giá có thể lấy từ giao dịch nhập phù hợp trước đó nhưng phải cho phép kiểm tra và xác nhận.
+- Thành tiền được tính tự động.
+- Tổng tiền được tính tự động.
+- Tổng số tiền bằng chữ được chuyển đổi từ tổng tiền bằng số.
+- Người lập và ngày tạo được hệ thống ghi nhận tự động.
+
+Không tự động lấy giá của lô thuốc cũ làm giá nhập mới nếu chưa có xác nhận.
+
+Cần phân biệt số lượng theo chứng từ và số lượng thực nhập.
+
+Cho phép nhập nhiều loại thuốc trong cùng một phiếu.
+
+Mỗi mặt hàng phải được quản lý theo lô và hạn sử dụng khi thông tin đó có áp dụng.
+
+2. PHÂN TÍCH SHEET "XUẤT"
+
+Biểu mẫu hiện có các nhóm thông tin:
+
+A. Thông tin đơn vị:
+- Đơn vị.
+- Bộ phận.
+- Mã QHNS.
+- Tên chứng từ: PHIẾU XUẤT KHO.
+
+B. Thông tin chứng từ:
+- Ngày xuất.
+- Số phiếu xuất.
+- Thông tin Nợ hoặc tài khoản kế toán nếu áp dụng.
+- Họ tên người nhận.
+- Bộ phận hoặc địa chỉ người nhận.
+- Lý do xuất kho.
+- Nội dung xuất thuốc cho đối tượng cụ thể.
+- Địa điểm sử dụng hoặc bộ phận liên quan.
+
+C. Bảng chi tiết thuốc:
+- Số thứ tự.
+- Tên thuốc, nhãn hiệu, quy cách và phẩm chất.
+- Mã số.
+- Đơn vị tính.
+- Số lượng yêu cầu.
+- Số lượng thực xuất.
+- Đơn giá.
+- Thành tiền.
+
+D. Phần tổng hợp và xác nhận:
+- Thành tiền.
+- Tổng cộng.
+- Tổng số tiền bằng chữ.
+- Ngày lập.
+- Người nhận hàng.
+- Thủ kho.
+- Kế toán trưởng.
+- Thủ trưởng đơn vị.
+
+YÊU CẦU:
+
+Phải giữ được thông tin người nhận, lý do xuất và đối tượng liên quan đến việc xuất thuốc.
+
+Hệ thống cần phân biệt:
+- Xuất kho.
+- Cấp phát thuốc cho đối tượng.
+- Ghi nhận việc sử dụng thuốc.
+
+Ba nghiệp vụ này có liên quan nhưng không mặc nhiên là một.
+
+Một phiếu xuất kho không phải lúc nào cũng chứng minh toàn bộ số thuốc đã được người bệnh sử dụng.
+
+Thiết kế quy trình liên kết các nghiệp vụ này nhưng vẫn giữ được tính độc lập của từng chứng từ.
+
+Khi lập phiếu xuất:
+- Cho phép chọn đối tượng liên quan.
+- Cho phép chọn đơn thuốc hoặc yêu cầu cấp phát tương ứng khi có.
+- Tự động lấy danh mục thuốc.
+- Hiển thị số lượng tồn khả dụng.
+- Hiển thị thông tin lô thuốc.
+- Cho phép nhập số lượng yêu cầu.
+- Cho phép nhập số lượng thực xuất.
+- Tính thành tiền.
+- Kiểm tra số lượng tồn.
+- Cảnh báo thuốc hết hạn.
+- Không cho xuất vượt tồn khả dụng.
+- Không ghi giảm tồn kho hai lần khi người dùng thao tác lặp.
+
+Không tự động biến đơn thuốc thành phiếu xuất kho nếu chưa có thao tác xác nhận nghiệp vụ cấp phát.
+
+3. PHÂN TÍCH SHEET "BÁO CÁO"
+
+Đây là biểu mẫu có vai trò đặc biệt quan trọng.
+
+Tên biểu mẫu:
+
+"BẢNG TỔNG HỢP NHẬP, XUẤT THUỐC MUA NGOÀI CHO ĐỐI TƯỢNG CÓ BẢO HIỂM Y TẾ".
+
+Biểu mẫu có các thông tin:
+
+- Tên cơ quan cấp trên.
+- Tên đơn vị.
+- Quốc hiệu và tiêu ngữ.
+- Ngày lập báo cáo.
+- Họ và tên đối tượng.
+- Danh sách thuốc.
+- Đơn vị tính.
+- Tồn đầu kỳ.
+- Nhập trong kỳ.
+- Tổng nhập.
+- Xuất trong kỳ.
+- Tồn cuối kỳ.
+- Các chỉ tiêu số lượng, đơn giá và thành tiền.
+- Tổng cộng.
+- Phần người lập biểu.
+- Phần người phụ trách Phòng Y tế - PHCN.
+
+Cấu trúc bảng hiện có:
+
+A. Thông tin thuốc:
+- Số thứ tự.
+- Tên thuốc và hàm lượng.
+- Đơn vị tính.
+
+B. Tồn đầu kỳ:
+- Số lượng.
+- Đơn giá.
+- Thành tiền.
+
+C. Nhập trong kỳ:
+- Số lượng.
+- Đơn giá.
+- Thành tiền.
+
+D. Tổng nhập:
+- Số lượng.
+- Đơn giá.
+- Thành tiền.
+
+E. Xuất trong kỳ:
+- Số lượng.
+- Đơn giá.
+- Thành tiền.
+
+F. Tồn cuối kỳ:
+- Số lượng.
+- Đơn giá.
+- Thành tiền.
+
+YÊU CẦU PHÂN TÍCH VÀ HOÀN THIỆN:
+
+Không chỉ sao chép cấu trúc Excel thành một bảng web.
+
+Hãy thiết kế hệ thống dữ liệu phía sau để có thể tự động tạo ra báo cáo theo đúng mẫu.
+
+Người dùng cần lựa chọn:
+- Đối tượng.
+- Kỳ báo cáo.
+- Kho hoặc phạm vi dữ liệu nếu có nhiều kho.
+- Nguồn thuốc phù hợp.
+- Loại báo cáo.
+
+Sau đó hệ thống tự động tổng hợp dữ liệu từ các giao dịch thực tế.
+
+Phải làm rõ ý nghĩa của từng chỉ tiêu.
+
+Đặc biệt, cần phân biệt:
+
+- Tồn đầu kỳ: số dư tại thời điểm trước khi bắt đầu kỳ báo cáo.
+- Nhập trong kỳ: lượng nhập phát sinh trong kỳ.
+- Tổng nhập: phải được định nghĩa rõ theo nghiệp vụ và cách trình bày của biểu mẫu.
+- Xuất trong kỳ: lượng xuất hợp lệ trong kỳ.
+- Tồn cuối kỳ: số dư cuối kỳ theo sổ theo dõi.
+
+Không được cộng trùng số liệu giữa "Nhập trong kỳ" và "Tổng nhập".
+
+Cần xây dựng quy tắc tính toán nhất quán giữa báo cáo và sổ giao dịch.
+
+Đối với thuốc được quản lý theo nhiều lô hoặc nhiều mức giá nhập, không được tự ý lấy một đơn giá tùy tiện để tính giá trị tồn kho.
+
+Phải đề xuất phương pháp tính giá trị tồn phù hợp, chẳng hạn phương pháp bình quân gia quyền hoặc phương pháp khác nếu được đơn vị phê duyệt.
+
+Nếu cần tái hiện chính xác biểu mẫu hiện có, phải giữ cấu trúc các cột và giải thích rõ cách tính từng chỉ tiêu.
+
+Không tự ý thay đổi nội dung biểu mẫu hành chính nếu chưa được người dùng xác nhận.
+
+4. KẾT LUẬN SAU KHI PHÂN TÍCH FILE
+
+Sau khi phân tích xong cả 3 sheet, hãy lập bảng gồm:
+
+- Sheet.
+- Nhóm thông tin.
+- Các trường dữ liệu.
+- Mục đích sử dụng.
+- Nguồn dữ liệu.
+- Trường cần nhập thủ công.
+- Trường tự động lấy dữ liệu.
+- Trường tự động tính toán.
+- Quy tắc kiểm tra.
+- Nơi lưu trữ.
+- Biểu mẫu đầu ra liên quan.
+
+Từ đó đề xuất cấu trúc dữ liệu chuẩn cho toàn bộ WebApp.
+
+III. KIẾN TRÚC CÔNG NGHỆ
+
+1. Phát triển giao diện và ứng dụng thông qua Google AI Studio.
+
+2. Sử dụng React và TypeScript hoặc công nghệ phù hợp với môi trường triển khai được lựa chọn.
+
+3. Sử dụng Google Sheets để lưu dữ liệu nghiệp vụ theo cấu trúc được thiết kế.
+
+4. Sử dụng Google Drive để lưu:
+- Phiếu nhập kho PDF.
+- Phiếu xuất kho PDF.
+- Đơn thuốc PDF.
+- Báo cáo nhập xuất tồn.
+- Báo cáo tổng hợp theo đối tượng.
+- Các chứng từ và tài liệu liên quan.
+
+5. Sử dụng dịch vụ xác thực phù hợp, ưu tiên Firebase Authentication hoặc phương án xác thực tương đương.
+
+6. Xây dựng lớp backend để xử lý nghiệp vụ, kiểm tra quyền và truy cập Google Sheets/Drive an toàn.
+
+7. Không để lộ API key, thông tin xác thực hoặc quyền truy cập hệ thống trong mã nguồn phía trình duyệt.
+
+8. Phải đánh giá giới hạn của Google Sheets khi nhiều người sử dụng đồng thời và khi thực hiện các nghiệp vụ cần bảo đảm tính toàn vẹn dữ liệu.
+
+Nếu cần, đề xuất sử dụng cơ sở dữ liệu giao dịch làm nguồn dữ liệu nghiệp vụ chính, đồng thời đồng bộ Google Sheets để báo cáo hoặc trao đổi dữ liệu.
+
+Không được mặc định rằng Google Sheets có thể bảo đảm mọi thao tác nghiệp vụ theo cơ chế giao dịch nguyên tử.
+
+IV. QUẢN LÝ TÀI KHOẢN
+
+Thiết kế quy trình:
+
+1. Người dùng truy cập trang đăng ký.
+2. Nhập email và mật khẩu.
+3. Xác minh email.
+4. Gửi yêu cầu đăng ký.
+5. Tài khoản ở trạng thái CHỜ PHÊ DUYỆT.
+6. Quản trị viên kiểm tra thông tin.
+7. Quản trị viên phê duyệt hoặc từ chối.
+8. Tài khoản được cấp vai trò phù hợp.
+9. Người dùng đăng nhập và sử dụng chức năng được phân quyền.
+
+Các trạng thái tài khoản:
+- Chờ phê duyệt.
+- Đang hoạt động.
+- Bị từ chối.
+- Tạm khóa.
+- Đã vô hiệu hóa.
+
+Không cho phép tài khoản chưa được phê duyệt truy cập dữ liệu nghiệp vụ.
+
+Không lưu mật khẩu dạng văn bản thuần trong Google Sheets.
+
+Phải kiểm tra quyền phía máy chủ.
+
+V. THIẾT KẾ CÁC PHÂN HỆ
+
+PHÂN HỆ 1: DANH MỤC THUỐC
+
+Mỗi thuốc cần có mã định danh duy nhất.
+
+Các trường đề xuất:
+- Mã thuốc.
+- Tên thuốc.
+- Hoạt chất.
+- Hàm lượng.
+- Dạng bào chế.
+- Đường dùng nếu cần.
+- Đơn vị tính.
+- Quy cách đóng gói.
+- Nhà sản xuất.
+- Nhóm thuốc.
+- Ngưỡng tồn tối thiểu.
+- Trạng thái sử dụng.
+- Ghi chú.
+
+Cho phép:
+- Thêm thuốc.
+- Sửa thông tin.
+- Tìm kiếm.
+- Lọc.
+- Ngừng sử dụng.
+- Tra cứu lịch sử giao dịch.
+
+Không xóa vật lý các thuốc đã phát sinh giao dịch nếu việc đó ảnh hưởng đến lịch sử dữ liệu.
+
+PHÂN HỆ 2: HỒ SƠ ĐỐI TƯỢNG
+
+Xây dựng danh mục đối tượng để phục vụ việc quản lý thuốc theo từng người.
+
+Các trường cần thiết:
+- Mã đối tượng nội bộ.
+- Họ và tên.
+- Thông tin nhận diện cần thiết.
+- Trạng thái hồ sơ.
+- Bộ phận hoặc khu quản lý nếu áp dụng.
+- Thông tin liên quan đến bảo hiểm y tế khi có yêu cầu nghiệp vụ.
+- Ghi chú.
+
+Chỉ thu thập các dữ liệu cần thiết cho công tác quản lý thuốc.
+
+Không sử dụng mã hồ sơ hoặc thông tin cá nhân làm khóa dữ liệu chính.
+
+Mỗi đối tượng có mã nội bộ ổn định.
+
+Khi đối tượng chuyển khu, rời Trung tâm hoặc hồ sơ ngừng hoạt động, lịch sử nhập, xuất và sử dụng thuốc vẫn phải được giữ lại.
+
+PHÂN HỆ 3: QUẢN LÝ NGUỒN THUỐC
+
+Cần phân loại nguồn thuốc theo nghiệp vụ thực tế, ví dụ:
+- Thuốc mua ngoài cho đối tượng.
+- Các nguồn thuốc khác nếu đơn vị có phát sinh và xác nhận sử dụng.
+
+Không tự mặc định mọi thuốc đều có cùng nguồn kinh phí hoặc cùng cách hạch toán.
+
+Cho phép cấu hình danh mục nguồn thuốc.
+
+Mỗi giao dịch phải ghi nhận nguồn thuốc khi thông tin này có ý nghĩa đối với báo cáo.
+
+Phải có khả năng lọc và tổng hợp theo nguồn thuốc.
+
+PHÂN HỆ 4: NHẬP KHO
+
+Tạo phiếu nhập theo mẫu Excel hiện có.
+
+Thông tin chung:
+- Mã phiếu nhập.
+- Ngày nhập.
+- Người giao.
+- Bộ phận giao.
+- Nhà cung cấp.
+- Số hóa đơn.
+- Ngày hóa đơn.
+- Nguồn thuốc.
+- Đối tượng liên quan.
+- Kho tiếp nhận.
+- Người lập.
+- Người kiểm nhận.
+- Ghi chú.
+- Trạng thái.
+
+Chi tiết:
+- Thuốc.
+- Đơn vị tính.
+- Số lô.
+- Hạn sử dụng.
+- Số lượng theo chứng từ.
+- Số lượng thực nhập.
+- Đơn giá.
+- Thành tiền.
+
+Quy trình:
+1. Tạo phiếu.
+2. Chọn đối tượng hoặc nguồn thuốc nếu cần.
+3. Thêm các mặt hàng.
+4. Kiểm tra dữ liệu.
+5. Lưu nháp.
+6. Duyệt nếu có quy trình phê duyệt.
+7. Ghi nhận giao dịch nhập kho.
+8. Cập nhật số tồn từ giao dịch hợp lệ.
+9. In phiếu.
+10. Tạo PDF.
+11. Lưu PDF lên Drive.
+12. Liên kết tệp với chứng từ.
+
+Không cho phép ghi nhận tăng tồn hai lần cho cùng một phiếu.
+
+PHÂN HỆ 5: QUẢN LÝ TỒN KHO
+
+Tồn kho phải được tính dựa trên các giao dịch hợp lệ.
+
+Phải quản lý:
+- Thuốc.
+- Lô thuốc.
+- Hạn sử dụng.
+- Nguồn thuốc.
+- Kho.
+- Đối tượng liên quan nếu có.
+- Số lượng nhập.
+- Số lượng xuất.
+- Điều chỉnh.
+- Hoàn trả.
+- Số dư.
+
+Công thức:
+
+Tồn cuối kỳ =
+Tồn đầu kỳ
++ Nhập hợp lệ
+- Xuất hợp lệ
++ Điều chỉnh tăng hợp lệ
+- Điều chỉnh giảm hợp lệ.
+
+Cần xác định rõ phạm vi tồn kho.
+
+Nếu thuốc được quản lý riêng theo đối tượng hoặc nguồn thuốc, phải bảo đảm số dư tổng và số dư chi tiết được tính nhất quán, không cộng trùng.
+
+Cảnh báo:
+- Thuốc sắp hết.
+- Thuốc hết tồn.
+- Thuốc gần hết hạn.
+- Thuốc hết hạn.
+- Lô thuốc có số dư bất thường.
+
+PHÂN HỆ 6: ĐƠN THUỐC
+
+Thiết kế chức năng lập và quản lý đơn thuốc.
+
+Thông tin chung:
+- Mã đơn thuốc.
+- Ngày lập.
+- Mã đối tượng.
+- Họ tên đối tượng.
+- Người kê đơn.
+- Thông tin chuyên môn cần thiết.
+- Trạng thái đơn.
+- Ghi chú.
+
+Chi tiết:
+- Thuốc.
+- Hàm lượng.
+- Đơn vị tính.
+- Liều dùng.
+- Số lần dùng.
+- Đường dùng.
+- Thời gian sử dụng.
+- Số lượng được kê.
+- Hướng dẫn sử dụng.
+- Ghi chú.
+
+Chỉ người có thẩm quyền mới được xác nhận nội dung chuyên môn.
+
+Không tự tạo chẩn đoán hoặc chỉ định điều trị.
+
+Phải có trạng thái:
+- Bản nháp.
+- Chờ xác nhận.
+- Đã xác nhận.
+- Đang cấp phát.
+- Đã cấp phát.
+- Đã hủy hoặc ngừng thực hiện theo nghiệp vụ.
+
+Cần cho phép theo dõi lượng thuốc đã cấp phát và lượng còn phải cấp theo đơn khi nghiệp vụ cho phép.
+
+Không tự động coi lượng thuốc được kê là lượng thuốc đã xuất.
+
+PHÂN HỆ 7: CẤP PHÁT THUỐC
+
+Đây là phân hệ liên kết đơn thuốc với nghiệp vụ xuất kho.
+
+Mỗi lần cấp phát cần ghi nhận:
+- Mã cấp phát.
+- Đơn thuốc liên quan.
+- Đối tượng.
+- Ngày cấp phát.
+- Người thực hiện.
+- Thuốc.
+- Lô thuốc.
+- Số lượng được yêu cầu.
+- Số lượng thực cấp.
+- Ghi chú.
+- Trạng thái.
+
+Quy trình:
+1. Chọn đơn thuốc hợp lệ.
+2. Kiểm tra nội dung đơn.
+3. Kiểm tra tồn kho.
+4. Chọn lô thuốc phù hợp.
+5. Xác nhận số lượng cấp.
+6. Ghi nhận cấp phát.
+7. Sinh giao dịch xuất kho liên quan.
+8. Cập nhật tồn kho.
+9. Cập nhật trạng thái cấp phát.
+10. Lưu lịch sử thao tác.
+
+Phải có cơ chế chống ghi trùng giao dịch.
+
+Nếu cấp phát nhiều lần cho một đơn thuốc, phải theo dõi số lượng đã cấp và số lượng còn lại.
+
+Không cho phép cấp vượt số lượng hợp lệ khi chưa có nghiệp vụ điều chỉnh được xác nhận.
+
+PHÂN HỆ 8: XUẤT KHO
+
+Hỗ trợ:
+- Xuất theo đơn thuốc.
+- Xuất theo yêu cầu cấp phát hợp lệ.
+- Xuất cho đối tượng.
+- Các nghiệp vụ xuất khác nếu được đơn vị xác nhận.
+
+Các thông tin và bố cục phải bám sát mẫu Excel.
+
+Khi xuất theo đơn thuốc hoặc cấp phát:
+- Tự động lấy thông tin liên quan.
+- Tự động điền danh sách thuốc.
+- Kiểm tra số lượng tồn.
+- Kiểm tra lô.
+- Kiểm tra hạn sử dụng.
+- Ghi nhận người nhận.
+- Ghi nhận lý do xuất.
+- Ghi nhận người giao và người nhận.
+
+Chỉ ghi giảm tồn khi chứng từ đạt trạng thái được quy định.
+
+PHÂN HỆ 9: BÁO CÁO NHẬP, XUẤT VÀ TỒN THUỐC THEO ĐỐI TƯỢNG
+
+Đây là phân hệ trọng tâm.
+
+Phải xây dựng báo cáo theo mẫu "BẢNG TỔNG HỢP NHẬP, XUẤT THUỐC MUA NGOÀI CHO ĐỐI TƯỢNG CÓ BẢO HIỂM Y TẾ".
+
+Cho phép:
+- Chọn đối tượng.
+- Chọn ngày bắt đầu.
+- Chọn ngày kết thúc.
+- Chọn nguồn thuốc.
+- Chọn thuốc.
+- Chọn kho nếu có.
+- Xem báo cáo.
+- In báo cáo.
+- Xuất PDF.
+- Lưu lên Google Drive.
+
+Báo cáo cần thể hiện:
+- Tên đơn vị.
+- Tên báo cáo.
+- Đối tượng.
+- Kỳ báo cáo.
+- Danh sách thuốc.
+- Đơn vị tính.
+- Tồn đầu kỳ.
+- Nhập trong kỳ.
+- Tổng nhập theo định nghĩa nghiệp vụ đã xác nhận.
+- Xuất trong kỳ.
+- Tồn cuối kỳ.
+- Số lượng.
+- Đơn giá.
+- Thành tiền.
+- Tổng cộng.
+- Người lập biểu.
+- Người phụ trách.
+
+Các phép tính phải được xây dựng từ dữ liệu giao dịch.
+
+Đối với số lượng:
+
+Tồn cuối kỳ =
+Tồn đầu kỳ
++ Tổng nhập hợp lệ trong kỳ
+- Tổng xuất hợp lệ trong kỳ
++ Điều chỉnh tăng hợp lệ
+- Điều chỉnh giảm hợp lệ.
+
+Đối với thành tiền:
+- Xác định phương pháp tính giá trị tồn.
+- Áp dụng nhất quán.
+- Không sử dụng đơn giá tùy tiện khi có nhiều lô và nhiều mức giá.
+- Đối chiếu tổng tiền với dữ liệu nguồn.
+
+Nếu biểu mẫu Excel đang sử dụng cách tính hoặc cách trình bày khác với quy tắc kế toán được đơn vị phê duyệt, hãy chỉ ra điểm khác biệt và đề xuất cách xử lý, không tự ý thay đổi.
+
+PHÂN HỆ 10: BÁO CÁO TỔNG HỢP
+
+Bổ sung các báo cáo:
+- Nhập thuốc theo thời gian.
+- Xuất thuốc theo thời gian.
+- Tồn kho theo thuốc.
+- Tồn kho theo lô.
+- Tồn kho theo nguồn thuốc.
+- Tồn kho theo đối tượng khi áp dụng.
+- Thuốc sắp hết hạn.
+- Thuốc dưới ngưỡng tồn.
+- Số lượng đơn thuốc.
+- Số lượng cấp phát.
+- Số lượng thuốc đã cấp.
+- Số lượng thuốc còn phải cấp theo đơn.
+- Lịch sử giao dịch.
+- Chứng từ chưa duyệt.
+- Chứng từ đã duyệt.
+- Chứng từ bị hủy hoặc điều chỉnh.
+
+Không đưa dữ liệu giả vào báo cáo chính thức.
+
+Mọi số liệu phải có khả năng truy xuất về các giao dịch nguồn.
+
+VI. THIẾT KẾ CẤU TRÚC GOOGLE SHEETS
+
+Đề xuất các sheet:
+
+1. USERS
+2. MEDICINES
+3. BENEFICIARIES
+4. SUPPLIERS
+5. WAREHOUSES
+6. MEDICINE_SOURCES
+7. STOCK_RECEIPTS
+8. STOCK_RECEIPT_ITEMS
+9. STOCK_ISSUES
+10. STOCK_ISSUE_ITEMS
+11. PRESCRIPTIONS
+12. PRESCRIPTION_ITEMS
+13. DISPENSATIONS
+14. DISPENSATION_ITEMS
+15. STOCK_TRANSACTIONS
+16. STOCK_ADJUSTMENTS
+17. FILES
+18. AUDIT_LOGS
+19. SETTINGS
+
+Có thể bổ sung các bảng liên kết nếu cần.
+
+Mỗi bảng phải có:
+- ID duy nhất.
+- Mã nghiệp vụ nếu có.
+- Thời gian tạo.
+- Thời gian cập nhật.
+- Người tạo.
+- Người cập nhật.
+- Trạng thái.
+
+Không sử dụng số thứ tự dòng làm khóa chính.
+
+Không sử dụng tên đối tượng hoặc tên thuốc làm khóa liên kết duy nhất.
+
+Các chi tiết phiếu nhập, phiếu xuất và đơn thuốc phải liên kết với bản ghi chính bằng ID ổn định.
+
+Phải giải thích rõ cấu trúc từng sheet, từng cột và kiểu dữ liệu.
+
+VII. THIẾT KẾ GOOGLE DRIVE
+
+Cấu trúc thư mục đề xuất:
+
+QUAN_LY_THUOC_TRUNG_TAM/
+    2026/
+        PHIEU_NHAP/
+        PHIEU_XUAT/
+        DON_THUOC/
+        CAP_PHAT/
+        BAO_CAO/
+    2027/
+        PHIEU_NHAP/
+        PHIEU_XUAT/
+        DON_THUOC/
+        CAP_PHAT/
+        BAO_CAO/
+
+Có thể chia thư mục báo cáo theo tháng hoặc đối tượng khi phù hợp.
+
+Không sử dụng tên người bệnh hoặc thông tin sức khỏe nhạy cảm trong tên tệp nếu không cần thiết.
+
+Ưu tiên đặt tên theo mã chứng từ và ngày lập.
+
+Mỗi tệp phải được ghi nhận:
+- File ID.
+- Mã chứng từ.
+- Loại tệp.
+- Ngày tạo.
+- Người tạo.
+- Phiên bản.
+- Trạng thái.
+- Thời gian cập nhật.
+
+Không chia sẻ công khai các tệp chứa thông tin sức khỏe.
+
+VIII. THIẾT KẾ GIAO DIỆN
+
+Giao diện tiếng Việt, hiện đại, thân thiện, dễ sử dụng.
+
+Thanh điều hướng:
+- Tổng quan.
+- Danh mục thuốc.
+- Hồ sơ đối tượng.
+- Nguồn thuốc.
+- Nhập kho.
+- Xuất kho.
+- Tồn kho.
+- Đơn thuốc.
+- Cấp phát thuốc.
+- Báo cáo.
+- Tệp đã lưu.
+- Quản lý người dùng.
+- Cài đặt.
+
+Màn hình tổng quan:
+- Tổng số loại thuốc.
+- Tổng số phiếu nhập.
+- Tổng số phiếu xuất.
+- Số lượng thuốc tồn.
+- Thuốc sắp hết.
+- Thuốc gần hết hạn.
+- Đơn thuốc trong kỳ.
+- Tình hình cấp phát.
+- Các chứng từ cần xử lý.
+
+Thiết kế biểu mẫu theo nguyên tắc:
+- Nhập ít nhưng đủ.
+- Tự động điền thông tin.
+- Tự động tính toán.
+- Có thể chỉnh sửa theo quyền.
+- Có kiểm tra dữ liệu.
+- Có xem trước.
+- Có nút in.
+- Có nút lưu PDF.
+- Có trạng thái đồng bộ rõ ràng.
+
+IX. IN ẤN
+
+Tạo các mẫu in riêng:
+
+1. Phiếu nhập kho.
+2. Phiếu xuất kho.
+3. Đơn thuốc.
+4. Phiếu hoặc bảng theo dõi cấp phát nếu được phê duyệt.
+5. Bảng tổng hợp nhập, xuất thuốc mua ngoài cho đối tượng có bảo hiểm y tế.
+6. Báo cáo tồn kho.
+7. Báo cáo sử dụng thuốc.
+
+Mẫu phiếu nhập và phiếu xuất phải giữ được các trường và bố cục nghiệp vụ trong Excel.
+
+Mẫu báo cáo theo đối tượng phải tái hiện được cấu trúc cột của sheet "báo cáo".
+
+Yêu cầu:
+- Xem trước trước khi in.
+- Hỗ trợ khổ giấy phù hợp.
+- Ưu tiên A4.
+- Ngắt trang hợp lý.
+- Không cắt mất tiêu đề, bảng hoặc phần ký xác nhận.
+- Tính tiền bằng số và chuyển đổi thành chữ.
+- Không thay đổi dữ liệu nghiệp vụ khi in.
+
+Quy trình lưu PDF:
+1. Lấy dữ liệu đã lưu.
+2. Tạo bản xem trước.
+3. Người dùng xác nhận xuất PDF.
+4. Tạo tệp.
+5. Lưu lên Google Drive.
+6. Nhận xác nhận từ Drive.
+7. Lưu File ID vào Google Sheets.
+8. Hiển thị liên kết truy cập theo quyền.
+9. Ghi nhật ký.
+
+Không báo thành công khi tệp chưa thực sự được lưu.
+
+X. ĐỒNG BỘ VÀ AN TOÀN DỮ LIỆU
+
+Thiết kế cơ chế:
+- Đồng bộ dữ liệu với Google Sheets.
+- Lưu tài liệu trên Google Drive.
+- Kiểm tra trạng thái lưu.
+- Chống ghi trùng.
+- Xử lý lỗi mạng.
+- Ghi nhận lỗi.
+- Kiểm tra xung đột khi nhiều người cùng sửa.
+- Lưu lịch sử thay đổi.
+- Sao lưu dữ liệu.
+- Phục hồi khi có sự cố.
+
+Phải giải thích rõ:
+- Dữ liệu nào được lưu ở đâu.
+- Thành phần nào là nguồn dữ liệu chính.
+- Cách cập nhật Google Sheets.
+- Cách phát hiện chỉnh sửa thủ công trên Sheets.
+- Cách cập nhật tệp PDF sau khi chứng từ thay đổi.
+- Cách giữ lịch sử các phiên bản.
+- Cách xử lý khi Sheets và Drive không đồng bộ.
+
+Không mặc định việc chỉnh sửa Sheets sẽ tự động làm thay đổi tệp PDF đã tạo trước đó.
+
+Nếu có chỉnh sửa chứng từ sau khi phát hành, phải có quy trình tạo phiên bản mới hoặc xử lý thay thế được kiểm soát.
+
+XI. BẢO MẬT
+
+- Xác thực tài khoản.
+- Phê duyệt người dùng.
+- Phân quyền theo vai trò.
+- Kiểm tra quyền phía máy chủ.
+- Không lưu mật khẩu dạng văn bản thuần.
+- Không để lộ khóa bí mật.
+- Giới hạn quyền truy cập Google Sheets và Google Drive.
+- Bảo vệ dữ liệu sức khỏe.
+- Ghi nhật ký thao tác quan trọng.
+- Có cơ chế sao lưu.
+- Không cho phép người dùng tự nâng quyền.
+- Không xóa lịch sử giao dịch đã phát sinh.
+- Có cơ chế điều chỉnh hoặc đảo giao dịch phù hợp.
+
+XII. KIỂM THỬ NGHIỆP VỤ
+
+Phải kiểm thử tối thiểu các trường hợp:
+
+1. Tạo thuốc mới.
+2. Nhập thuốc theo lô.
+3. Nhập nhiều thuốc trong một phiếu.
+4. Xuất thuốc theo lô.
+5. Xuất thuốc cho một đối tượng.
+6. Tạo đơn thuốc.
+7. Cấp phát nhiều lần cho một đơn.
+8. Kiểm tra tồn kho.
+9. Kiểm tra số lượng xuất vượt tồn.
+10. Kiểm tra thuốc hết hạn.
+11. Lập báo cáo theo đối tượng.
+12. Lập báo cáo theo kỳ.
+13. Đối chiếu tồn đầu kỳ và tồn cuối kỳ.
+14. Kiểm tra tổng tiền.
+15. In phiếu nhập.
+16. In phiếu xuất.
+17. Xuất PDF.
+18. Lưu PDF lên Drive.
+19. Cập nhật dữ liệu trên Sheets.
+20. Chỉnh sửa chứng từ.
+21. Chống ghi nhận trùng giao dịch.
+22. Hai người dùng cùng thao tác.
+23. Tài khoản chưa được duyệt.
+24. Người dùng không đủ quyền.
+25. Lỗi mạng hoặc lỗi API.
+
+Phải có dữ liệu kiểm thử riêng, không làm thay đổi dữ liệu chính thức.
+
+XIII. QUY TRÌNH THỰC HIỆN TRÊN GOOGLE AI STUDIO
+
+GIAI ĐOẠN 1:
+Phân tích chi tiết cả 3 sheet Excel và hoàn thiện yêu cầu nghiệp vụ.
+
+GIAI ĐOẠN 2:
+Thiết kế cơ sở dữ liệu, quy trình nghiệp vụ và giao diện.
+
+GIAI ĐOẠN 3:
+Xây dựng các phân hệ và tích hợp API.
+
+GIAI ĐOẠN 4:
+Kiểm thử số liệu, nghiệp vụ, bảo mật và đồng bộ.
+
+GIAI ĐOẠN 5:
+Triển khai, hướng dẫn sử dụng và nghiệm thu.
+
+Không viết toàn bộ mã nguồn trước khi hoàn thành phân tích nghiệp vụ.
+
+Không tự suy đoán những quy tắc chưa có trong file Excel.
+
+Nếu phát hiện điểm chưa rõ, hãy đưa ra câu hỏi để người dùng xác nhận.
+
+XIV. YÊU CẦU ĐẦU RA CỦA LƯỢT LÀM VIỆC ĐẦU TIÊN
+
+Trước tiên, hãy hoàn thành các nội dung:
+
+1. Báo cáo phân tích toàn bộ 3 sheet Excel.
+2. Bảng đối chiếu trường dữ liệu giữa 3 sheet.
+3. Sơ đồ liên kết nhập kho, xuất kho, đơn thuốc, cấp phát và báo cáo.
+4. Đề xuất cấu trúc Google Sheets.
+5. Quy tắc tính tồn kho và thành tiền.
+6. Quy tắc quản lý thuốc theo lô, nguồn thuốc và đối tượng.
+7. Thiết kế quy trình sử dụng WebApp.
+8. Danh sách các vấn đề cần xác nhận trước khi lập trình.
+
+Chưa triển khai toàn bộ mã nguồn ở giai đoạn này.
+
+Sau khi người dùng xác nhận phương án, mới chuyển sang thiết kế chi tiết và xây dựng ứng dụng.
+
+MỤC TIÊU CUỐI CÙNG:
+
+Xây dựng một WebApp quản lý thuốc hoàn chỉnh, giúp nhân viên nhập liệu một lần, sử dụng dữ liệu xuyên suốt các nghiệp vụ, giảm thao tác thủ công, hạn chế sai sót, quản lý được lịch sử từng lô thuốc và từng đối tượng, đồng thời tạo ra các phiếu nhập, phiếu xuất và báo cáo đúng với biểu mẫu nghiệp vụ của Trung tâm Bảo trợ xã hội Đà Nẵng.

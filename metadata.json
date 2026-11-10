@@ -1,0 +1,6 @@
+{
+  "name": "Hệ Thống Quản Lý Thuốc & Kho Dược - TT BTXH Đà Nẵng",
+  "description": "Hệ thống quản lý danh mục thuốc, nhập xuất tồn kho, cấp phát theo đơn đối tượng và báo cáo đồng bộ tại Trung tâm Bảo trợ xã hội Đà Nẵng.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

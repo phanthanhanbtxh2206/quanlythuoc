@@ -5,7 +5,7 @@
 
 import React, { useState } from 'react';
 import { useApp } from '../../context/AppContext';
-import { StockReceipt, StockReceiptItem, MedicineSourceType } from '../../types';
+import { StockReceipt, StockReceiptItem, MedicineSourceType, Medicine } from '../../types';
 import { Plus, Search, Edit2, Printer, Trash2, Calendar, FileText, Check, AlertCircle, Sparkles, Pill, RefreshCw } from 'lucide-react';
 import { Modal } from '../common/Modal';
 import { PrintModal, PrintDocumentType } from '../print/PrintModal';
@@ -135,12 +135,12 @@ export const StockReceiptListView: React.FC = () => {
   };
 
   const handleAddItemRow = () => {
-    setItems([
-      ...items,
+    setItems((prev) => [
+      ...prev,
       {
         medicineId: medicines[0]?.id || '',
         isCustom: false,
-        batchNumber: `LOT-${new Date().getFullYear()}-0${items.length + 1}`,
+        batchNumber: `LOT-${new Date().getFullYear()}-0${prev.length + 1}`,
         docQuantity: 10,
         actualQuantity: 10,
         unitPrice: 1000,
@@ -149,8 +149,8 @@ export const StockReceiptListView: React.FC = () => {
   };
 
   const handleAddCustomItemRow = () => {
-    setItems([
-      ...items,
+    setItems((prev) => [
+      ...prev,
       {
         medicineId: '',
         isCustom: true,
@@ -159,7 +159,7 @@ export const StockReceiptListView: React.FC = () => {
         customConcentration: '',
         customUnit: 'Viên',
         customPackaging: 'Hộp',
-        batchNumber: `LOT-${new Date().getFullYear()}-0${items.length + 1}`,
+        batchNumber: `LOT-${new Date().getFullYear()}-0${prev.length + 1}`,
         docQuantity: 10,
         actualQuantity: 10,
         unitPrice: 1000,
@@ -168,14 +168,47 @@ export const StockReceiptListView: React.FC = () => {
   };
 
   const handleRemoveItemRow = (index: number) => {
-    if (items.length <= 1) return;
-    setItems(items.filter((_, i) => i !== index));
+    setItems((prev) => (prev.length <= 1 ? prev : prev.filter((_, i) => i !== index)));
   };
 
   const handleItemChange = (index: number, field: keyof RowItem, value: any) => {
-    const updated = [...items];
-    updated[index] = { ...updated[index], [field]: value };
-    setItems(updated);
+    setItems((prev) => {
+      const updated = [...prev];
+      if (!updated[index]) return prev;
+      updated[index] = { ...updated[index], [field]: value };
+      return updated;
+    });
+  };
+
+  const switchToCustomMedicine = (index: number, existingMed?: Medicine) => {
+    setItems((prev) => {
+      const updated = [...prev];
+      if (!updated[index]) return prev;
+      updated[index] = {
+        ...updated[index],
+        isCustom: true,
+        medicineId: '',
+        customName: existingMed?.name || updated[index].customName || '',
+        customActiveIngredient: existingMed?.activeIngredient || updated[index].customActiveIngredient || '',
+        customConcentration: existingMed?.concentration || updated[index].customConcentration || '',
+        customUnit: existingMed?.unit || updated[index].customUnit || 'Viên',
+        customPackaging: existingMed?.packaging || updated[index].customPackaging || 'Hộp',
+      };
+      return updated;
+    });
+  };
+
+  const switchToCatalogMedicine = (index: number, defaultMedId?: string) => {
+    setItems((prev) => {
+      const updated = [...prev];
+      if (!updated[index]) return prev;
+      updated[index] = {
+        ...updated[index],
+        isCustom: false,
+        medicineId: defaultMedId || medicines[0]?.id || '',
+      };
+      return updated;
+    });
   };
 
   const totalAmount = items.reduce((sum, item) => sum + (Number(item.actualQuantity) || 0) * (Number(item.unitPrice) || 0), 0);
@@ -582,9 +615,36 @@ export const StockReceiptListView: React.FC = () => {
                       <tr key={idx} className="hover:bg-slate-50/50">
                         <td className="p-2 text-center text-slate-400 font-mono align-top pt-3">{idx + 1}</td>
                         <td className="p-2 align-top">
+                          {/* Segmented Selector for Catalog vs Custom New Medicine */}
+                          <div className="flex items-center gap-1 mb-2 p-0.5 bg-slate-100 rounded-lg border border-slate-200 w-fit">
+                            <button
+                              type="button"
+                              onClick={() => switchToCatalogMedicine(idx)}
+                              className={`px-2 py-1 rounded text-3xs font-semibold transition-all flex items-center gap-1 ${
+                                !item.isCustom
+                                  ? 'bg-white text-teal-800 shadow-2xs font-bold border border-slate-200'
+                                  : 'text-slate-500 hover:text-slate-800'
+                              }`}
+                            >
+                              <span>📋 Chọn từ danh mục</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => switchToCustomMedicine(idx, med)}
+                              className={`px-2 py-1 rounded text-3xs font-semibold transition-all flex items-center gap-1 ${
+                                item.isCustom
+                                  ? 'bg-emerald-600 text-white shadow-2xs font-bold'
+                                  : 'text-emerald-700 hover:text-emerald-900'
+                              }`}
+                            >
+                              <Sparkles className="w-2.5 h-2.5" />
+                              <span>✍️ Tự điền thuốc mới</span>
+                            </button>
+                          </div>
+
                           {item.isCustom ? (
                             /* Form Tự Điền Thông Tin Thuốc Mới */
-                            <div className="p-2.5 bg-emerald-50/70 border border-emerald-300 rounded-lg space-y-2">
+                            <div className="p-2.5 bg-emerald-50/80 border border-emerald-300 rounded-lg space-y-2">
                               <div className="flex items-center justify-between">
                                 <span className="text-3xs font-bold text-emerald-900 uppercase flex items-center gap-1">
                                   <Pill className="w-3.5 h-3.5 text-emerald-600" />
@@ -592,7 +652,7 @@ export const StockReceiptListView: React.FC = () => {
                                 </span>
                                 <button
                                   type="button"
-                                  onClick={() => handleItemChange(idx, 'isCustom', false)}
+                                  onClick={() => switchToCatalogMedicine(idx)}
                                   className="text-3xs text-slate-500 hover:text-slate-800 underline font-medium"
                                   title="Quay lại chọn thuốc có sẵn trong danh mục"
                                 >
@@ -601,49 +661,55 @@ export const StockReceiptListView: React.FC = () => {
                               </div>
 
                               <div>
+                                <label className="block text-3xs font-bold text-emerald-900 mb-0.5">Tên thuốc / biệt dược: *</label>
                                 <input
                                   type="text"
                                   required
-                                  placeholder="Tên thuốc / biệt dược * (vd: Diazepam 5mg)"
+                                  autoFocus
+                                  placeholder="Nhập tên thuốc mới... (vd: Diazepam 5mg)"
                                   value={item.customName || ''}
                                   onChange={(e) => handleItemChange(idx, 'customName', e.target.value)}
-                                  className="w-full p-1.5 border border-emerald-400 rounded text-xs font-bold text-slate-900 bg-white placeholder:font-normal placeholder:text-slate-400"
+                                  className="w-full p-1.5 border border-emerald-400 rounded text-xs font-bold text-slate-900 bg-white placeholder:font-normal placeholder:text-slate-400 focus:ring-1 focus:ring-emerald-500"
                                 />
                               </div>
 
                               <div className="grid grid-cols-2 gap-1.5 text-2xs">
                                 <div>
+                                  <label className="block text-3xs text-slate-500 mb-0.5">Hoạt chất:</label>
                                   <input
                                     type="text"
-                                    placeholder="Hoạt chất (vd: Diazepam)"
+                                    placeholder="vd: Diazepam"
                                     value={item.customActiveIngredient || ''}
                                     onChange={(e) => handleItemChange(idx, 'customActiveIngredient', e.target.value)}
                                     className="w-full p-1 border border-slate-200 rounded text-2xs bg-white"
                                   />
                                 </div>
                                 <div>
+                                  <label className="block text-3xs text-slate-500 mb-0.5">Hàm lượng:</label>
                                   <input
                                     type="text"
-                                    placeholder="Hàm lượng (vd: 5mg)"
+                                    placeholder="vd: 5mg"
                                     value={item.customConcentration || ''}
                                     onChange={(e) => handleItemChange(idx, 'customConcentration', e.target.value)}
                                     className="w-full p-1 border border-slate-200 rounded text-2xs bg-white"
                                   />
                                 </div>
                                 <div>
+                                  <label className="block text-3xs text-slate-500 mb-0.5">Đơn vị tính:</label>
                                   <input
                                     type="text"
                                     list="common-units"
-                                    placeholder="Đơn vị tính (vd: Viên)"
+                                    placeholder="vd: Viên, Lọ, Chai"
                                     value={item.customUnit || 'Viên'}
                                     onChange={(e) => handleItemChange(idx, 'customUnit', e.target.value)}
                                     className="w-full p-1 border border-slate-200 rounded text-2xs bg-white font-medium"
                                   />
                                 </div>
                                 <div>
+                                  <label className="block text-3xs text-slate-500 mb-0.5">Quy cách:</label>
                                   <input
                                     type="text"
-                                    placeholder="Quy cách (vd: Hộp 10 vỉ)"
+                                    placeholder="vd: Hộp 10 vỉ"
                                     value={item.customPackaging || ''}
                                     onChange={(e) => handleItemChange(idx, 'customPackaging', e.target.value)}
                                     className="w-full p-1 border border-slate-200 rounded text-2xs bg-white"
@@ -654,38 +720,19 @@ export const StockReceiptListView: React.FC = () => {
                           ) : (
                             /* Chọn Thuốc Có Sẵn Từ Danh Mục */
                             <div className="space-y-1">
-                              <div className="flex items-center justify-between">
-                                <span className="text-3xs text-slate-500 font-medium">Chọn từ danh mục:</span>
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    handleItemChange(idx, 'isCustom', true);
-                                    handleItemChange(idx, 'customName', med?.name || '');
-                                    handleItemChange(idx, 'customActiveIngredient', med?.activeIngredient || '');
-                                    handleItemChange(idx, 'customConcentration', med?.concentration || '');
-                                    handleItemChange(idx, 'customUnit', med?.unit || 'Viên');
-                                    handleItemChange(idx, 'customPackaging', med?.packaging || 'Hộp');
-                                  }}
-                                  className="text-3xs text-emerald-700 hover:text-emerald-900 font-semibold underline flex items-center gap-0.5"
-                                  title="Chuyển sang chế độ tự điền thông tin chi tiết"
-                                >
-                                  <Sparkles className="w-2.5 h-2.5" />
-                                  <span>Tự điền thuốc mới</span>
-                                </button>
-                              </div>
                               <select
                                 value={item.medicineId}
                                 onChange={(e) => {
                                   if (e.target.value === '__CUSTOM_NEW__') {
-                                    handleItemChange(idx, 'isCustom', true);
+                                    switchToCustomMedicine(idx);
                                   } else {
                                     handleItemChange(idx, 'medicineId', e.target.value);
                                   }
                                 }}
-                                className="w-full p-1.5 border border-slate-200 rounded text-xs bg-white font-medium text-slate-800"
+                                className="w-full p-1.5 border border-slate-200 rounded text-xs bg-white font-medium text-slate-800 focus:border-teal-500"
                               >
                                 <option value="__CUSTOM_NEW__" className="text-emerald-700 font-bold bg-emerald-50">
-                                  + ✦ [Tự điền thông tin thuốc mới...]
+                                  + ✍️ [Tự điền thông tin thuốc mới...]
                                 </option>
                                 {medicines.map((m) => (
                                   <option key={m.id} value={m.id}>

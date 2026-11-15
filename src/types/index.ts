@@ -33,6 +33,7 @@ export interface RolePermissions {
   canManageSettings: boolean;
   canManageUsers: boolean;
   canViewAudit: boolean;
+  canManageSync: boolean;
 }
 
 export const ROLE_PERMISSIONS: Record<UserRole, RolePermissions> = {
@@ -48,6 +49,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, RolePermissions> = {
     canManageSettings: true,
     canManageUsers: true,
     canViewAudit: true,
+    canManageSync: true,
   },
   PHARMACIST: {
     canCreateReceipt: true,
@@ -61,6 +63,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, RolePermissions> = {
     canManageSettings: false,
     canManageUsers: false,
     canViewAudit: false,
+    canManageSync: false,
   },
   DOCTOR: {
     canCreateReceipt: false,
@@ -74,6 +77,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, RolePermissions> = {
     canManageSettings: false,
     canManageUsers: false,
     canViewAudit: false,
+    canManageSync: false,
   },
   ACCOUNTANT: {
     canCreateReceipt: false,
@@ -87,6 +91,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, RolePermissions> = {
     canManageSettings: false,
     canManageUsers: false,
     canViewAudit: false,
+    canManageSync: false,
   },
   LEADER: {
     canCreateReceipt: false,
@@ -100,6 +105,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, RolePermissions> = {
     canManageSettings: false,
     canManageUsers: false,
     canViewAudit: true,
+    canManageSync: false,
   },
 };
 
@@ -341,54 +347,225 @@ export interface DriveSyncedFile {
   docType: 'PHIEU_NHAP' | 'PHIEU_XUAT' | 'DON_THUOC' | 'BAO_CAO_BHYT';
   fileName: string;
   driveFolder: string;
+  webViewLink?: string;
+  uploadChannel?: 'APPS_SCRIPT' | 'OAUTH_DRIVE_V3' | 'LOCAL_RECORD';
   createdAt: string;
   fileSize: string;
   syncedToSheets: boolean;
 }
 
+export type GoogleSyncMode = 'HYBRID' | 'APPS_SCRIPT' | 'OAUTH';
+
 export interface TemplateSettings {
-  // Đơn vị & Cơ quan
+  // 1. Quốc hiệu, Tiêu ngữ & Đơn vị hành chính chung
+  nationalMottoTop: string; // CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM
+  nationalMottoSub: string; // Độc lập - Tự do - Hạnh phúc
   parentOrg: string; // SỞ LAO ĐỘNG - THƯƠNG BINH VÀ XÃ HỘI TP ĐÀ NẴNG
   agencyName: string; // TRUNG TÂM BẢO TRỢ XÃ HỘI
   deptName: string; // PHÒNG Y TẾ - PHCN
   qhnsCode: string; // 1041008
   facilityAddress: string; // Đà Nẵng
-  
-  // Tiêu đề & Mẫu số chứng từ
+  datePlaceLine: string; // Đà Nẵng, ngày ..... tháng ..... năm 2026
+  totalAmountWordsLabel: string; // - Tổng số tiền (viết bằng chữ):
+  totalAmountLabel: string; // Cộng thành tiền:
+
+  // 2. Biểu mẫu Phiếu Nhập Kho (C20-HD)
   receiptFormCode: string; // Mẫu số: C20-HD
   receiptNotice: string; // (Ban hành theo Thông tư BTC)
   receiptTitle: string; // PHIẾU NHẬP KHO
   receiptDefaultWarehouse: string; // Kho Dược - Phòng Y tế & PHCN Trung tâm
+  receiptLabelDeliverer: string; // - Họ tên người giao hàng:
+  receiptLabelDelivererDept: string; // - Địa chỉ / Bộ phận giao:
+  receiptLabelInvoice: string; // - Theo hóa đơn số:
+  receiptLabelContent: string; // - Nội dung nhập kho:
+  receiptLabelBeneficiary: string; // - Đối tượng liên quan:
+  receiptLabelWarehouse: string; // - Nhập tại kho:
+  receiptColStt: string;
+  receiptColName: string;
+  receiptColCode: string;
+  receiptColUnit: string;
+  receiptColBatch: string;
+  receiptColDocQty: string;
+  receiptColActualQty: string;
+  receiptColUnitPrice: string;
+  receiptColTotalPrice: string;
+  receiptFooterNote: string;
+  receiptDelivererRoleLabel: string; // Người giao hàng
+  receiptDelivererSignNote: string; // (Ký, họ tên)
 
+  // 3. Biểu mẫu Phiếu Xuất Kho (C21-HD)
   issueFormCode: string; // Mẫu số: C21-HD
   issueNotice: string; // (Ban hành theo Thông tư BTC)
   issueTitle: string; // PHIẾU XUẤT KHO
   issueDefaultWarehouse: string; // Kho Dược - Phòng Y tế - PHCN Trung tâm
+  issueLabelReceiver: string; // - Họ tên người nhận hàng:
+  issueLabelReceiverDept: string; // - Bộ phận / Địa chỉ:
+  issueLabelReason: string; // - Lý do xuất kho:
+  issueLabelBeneficiary: string; // - Đối tượng nhận thuốc:
+  issueLabelWarehouse: string; // - Xuất tại kho:
+  issueLabelUsageLocation: string; // - Địa điểm sử dụng:
+  issueColStt: string;
+  issueColName: string;
+  issueColCode: string;
+  issueColUnit: string;
+  issueColBatch: string;
+  issueColReqQty: string;
+  issueColActualQty: string;
+  issueColUnitPrice: string;
+  issueColTotalPrice: string;
+  issueFooterNote: string;
+  issueReceiverRoleLabel: string; // Người nhận hàng
+  issueReceiverSignNote: string; // (Ký, họ tên)
 
+  // 4. Biểu mẫu Báo Cáo Tổng Hợp BHYT
   reportTitle: string; // BẢNG TỔNG HỢP NHẬP, XUẤT THUỐC MUA NGOÀI CHO ĐỐI TƯỢNG CÓ BẢO HIỂM Y TẾ
+  reportSubtitle: string; // Nguồn kinh phí: Mua ngoài cho đối tượng có BHYT
+  reportColStt: string;
+  reportColName: string;
+  reportColUnit: string;
+  reportGroupOpening: string; // Tồn đầu kỳ
+  reportGroupIn: string; // Nhập trong kỳ
+  reportGroupTotalIn: string; // Tổng nhập
+  reportGroupOut: string; // Xuất trong kỳ
+  reportGroupClosing: string; // Tồn cuối kỳ
+  reportSubColQty: string; // SL
+  reportSubColPrice: string; // Đơn giá
+  reportSubColAmount: string; // Thành tiền
+  reportGrandTotalLabel: string; // Tổng cộng:
+  reportFooterNote: string; // Ghi chú cuối báo cáo
 
-  // Chữ ký & Chức danh mặc định
+  // 5. Chữ ký & Chức danh mặc định (5 vị trí)
   preparerName: string; // DS. Lê Thu Hà
   preparerTitle: string; // Người lập biểu
+  preparerSignNote: string; // (Ký, họ tên)
   deptLeaderName: string; // BS. CKI. Nguyễn Thanh Long
   deptLeaderTitle: string; // Phụ trách Phòng Y tế - PHCN
+  deptLeaderSignNote: string; // (Ký, họ tên)
   accountantName: string; // Trần Đình Trọng
   accountantTitle: string; // Kế toán trưởng
+  accountantSignNote: string; // (Ký, họ tên)
   warehouseKeeperName: string; // Trần Văn Kho
   warehouseKeeperTitle: string; // Thủ kho
+  warehouseKeeperSignNote: string; // (Ký, họ tên)
   centerDirectorName: string; // Lê Minh Tuấn
   centerDirectorTitle: string; // Thủ trưởng đơn vị
+  centerDirectorSignNote: string; // (Ký, họ tên, đóng dấu)
 
-  // Google Sheet & Drive Auto-backup Settings
+  // 6. Google Sheets & Drive Sync Settings (Admin Only)
+  syncMode: GoogleSyncMode;
+  appsScriptUrl: string;
   autoBackupEnabled: boolean;
   googleSheetUrl: string;
   googleSpreadsheetId?: string;
   googleUserEmail?: string;
   googleDriveFolder: string;
   autoSyncOnTransaction: boolean;
+  lastSyncChannel?: string;
   lastBackupTime?: string;
   lastBackupMessage?: string;
 }
+
+export const DEFAULT_TEMPLATE_SETTINGS: TemplateSettings = {
+  nationalMottoTop: 'CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM',
+  nationalMottoSub: 'Độc lập - Tự do - Hạnh phúc',
+  parentOrg: 'SỞ LAO ĐỘNG - THƯƠNG BINH VÀ XÃ HỘI TP ĐÀ NẴNG',
+  agencyName: 'TRUNG TÂM BẢO TRỢ XÃ HỘI',
+  deptName: 'PHÒNG Y TẾ - PHCN',
+  qhnsCode: '1041008',
+  facilityAddress: 'Đà Nẵng',
+  datePlaceLine: 'Đà Nẵng, ngày ..... tháng ..... năm 2026',
+  totalAmountWordsLabel: '- Tổng số tiền (viết bằng chữ):',
+  totalAmountLabel: 'Cộng thành tiền:',
+
+  receiptFormCode: 'Mẫu số: C20-HD',
+  receiptNotice: '(Ban hành theo Thông tư BTC)',
+  receiptTitle: 'PHIẾU NHẬP KHO',
+  receiptDefaultWarehouse: 'Kho Dược - Phòng Y tế & PHCN Trung tâm',
+  receiptLabelDeliverer: '- Họ tên người giao hàng:',
+  receiptLabelDelivererDept: '- Địa chỉ / Bộ phận giao:',
+  receiptLabelInvoice: '- Theo hóa đơn số:',
+  receiptLabelContent: '- Nội dung nhập kho:',
+  receiptLabelBeneficiary: '- Đối tượng liên quan:',
+  receiptLabelWarehouse: '- Nhập tại kho:',
+  receiptColStt: 'STT',
+  receiptColName: 'Tên thuốc, nhãn hiệu, quy cách, phẩm chất',
+  receiptColCode: 'Mã số',
+  receiptColUnit: 'ĐVT',
+  receiptColBatch: 'Số lô',
+  receiptColDocQty: 'SL chứng từ',
+  receiptColActualQty: 'Thực nhập',
+  receiptColUnitPrice: 'Đơn giá (₫)',
+  receiptColTotalPrice: 'Thành tiền (₫)',
+  receiptFooterNote: 'Chứng từ được kiểm nhập đúng chủng loại, số lượng và đơn giá theo hóa đơn mua hàng.',
+  receiptDelivererRoleLabel: 'Người giao hàng',
+  receiptDelivererSignNote: '(Ký, họ tên)',
+
+  issueFormCode: 'Mẫu số: C21-HD',
+  issueNotice: '(Ban hành theo Thông tư BTC)',
+  issueTitle: 'PHIẾU XUẤT KHO',
+  issueDefaultWarehouse: 'Kho Dược - Phòng Y tế - PHCN Trung tâm',
+  issueLabelReceiver: '- Họ tên người nhận hàng:',
+  issueLabelReceiverDept: '- Bộ phận / Địa chỉ:',
+  issueLabelReason: '- Lý do xuất kho:',
+  issueLabelBeneficiary: '- Đối tượng nhận thuốc:',
+  issueLabelWarehouse: '- Xuất tại kho:',
+  issueLabelUsageLocation: '- Địa điểm sử dụng:',
+  issueColStt: 'STT',
+  issueColName: 'Tên thuốc, nhãn hiệu, quy cách',
+  issueColCode: 'Mã số',
+  issueColUnit: 'ĐVT',
+  issueColBatch: 'Số lô',
+  issueColReqQty: 'Yêu cầu',
+  issueColActualQty: 'Thực xuất',
+  issueColUnitPrice: 'Đơn giá (₫)',
+  issueColTotalPrice: 'Thành tiền (₫)',
+  issueFooterNote: 'Thuốc đã được kiểm tra và cấp phát đúng đối tượng điều trị theo chỉ định chuyên môn.',
+  issueReceiverRoleLabel: 'Người nhận hàng',
+  issueReceiverSignNote: '(Ký, họ tên)',
+
+  reportTitle: 'BẢNG TỔNG HỢP NHẬP, XUẤT THUỐC MUA NGOÀI CHO ĐỐI TƯỢNG CÓ BẢO HIỂM Y TẾ',
+  reportSubtitle: 'Nguồn: Thuốc mua ngoài phục vụ đối tượng có thẻ Bảo hiểm Y tế tại Trung tâm',
+  reportColStt: 'STT',
+  reportColName: 'Tên thuốc và hàm lượng',
+  reportColUnit: 'ĐVT',
+  reportGroupOpening: 'Tồn đầu kỳ',
+  reportGroupIn: 'Nhập trong kỳ',
+  reportGroupTotalIn: 'Tổng nhập (= Tồn đầu + Nhập)',
+  reportGroupOut: 'Xuất trong kỳ',
+  reportGroupClosing: 'Tồn cuối kỳ (= Tổng nhập - Xuất)',
+  reportSubColQty: 'SL',
+  reportSubColPrice: 'Đơn giá',
+  reportSubColAmount: 'Thành tiền',
+  reportGrandTotalLabel: 'Cộng tổng số:',
+  reportFooterNote: 'Ghi chú: Tổng nhập = Tồn đầu kỳ + Nhập trong kỳ; Tồn cuối kỳ = Tổng nhập - Xuất trong kỳ. Số liệu khớp sổ kho.',
+
+  preparerName: 'DS. Lê Thu Hà',
+  preparerTitle: 'Người lập biểu',
+  preparerSignNote: '(Ký, họ tên)',
+  deptLeaderName: 'BS. CKI. Nguyễn Thanh Long',
+  deptLeaderTitle: 'Phụ trách Phòng Y tế - PHCN',
+  deptLeaderSignNote: '(Ký, họ tên)',
+  accountantName: 'Trần Đình Trọng',
+  accountantTitle: 'Kế toán trưởng',
+  accountantSignNote: '(Ký, họ tên)',
+  warehouseKeeperName: 'Trần Văn Kho',
+  warehouseKeeperTitle: 'Thủ kho',
+  warehouseKeeperSignNote: '(Ký, họ tên)',
+  centerDirectorName: 'Lê Minh Tuấn',
+  centerDirectorTitle: 'Thủ trưởng đơn vị',
+  centerDirectorSignNote: '(Ký, họ tên, đóng dấu)',
+
+  syncMode: 'HYBRID',
+  appsScriptUrl: '',
+  autoBackupEnabled: true,
+  googleSheetUrl: '',
+  googleSpreadsheetId: '',
+  googleDriveFolder: 'QUAN_LY_THUOC_TRUNG_TAM/2026',
+  autoSyncOnTransaction: true,
+  lastSyncChannel: 'Chưa đồng bộ',
+  lastBackupTime: 'Chưa đồng bộ',
+  lastBackupMessage: 'Sẵn sàng cấu hình đồng bộ Google Apps Script & Google OAuth',
+};
 
 export interface BackupLog {
   id: string;

@@ -20,8 +20,8 @@ import {
   Plus,
   Trash2,
   Save,
-  Building2,
   Sparkles,
+  ExternalLink,
 } from 'lucide-react';
 import { formatCurrency, formatNumber, formatDate } from '../../utils/formatters';
 
@@ -44,6 +44,7 @@ export const BeneficiaryReportView: React.FC<BeneficiaryReportViewProps> = ({ in
 
   const canEditReport = hasPermission('canEditReport');
   const canExportReport = hasPermission('canExportReport');
+  const isAdmin = currentUser?.role === 'ADMIN' && hasPermission('canManageSync');
 
   // Danh sách đối tượng trích xuất trực tiếp từ các Phiếu Nhập Kho (mục phiếu nhập)
   const receiptBeneficiaries = useMemo(() => {
@@ -199,7 +200,8 @@ export const BeneficiaryReportView: React.FC<BeneficiaryReportViewProps> = ({ in
   const [startDate, setStartDate] = useState('2026-10-01');
   const [endDate, setEndDate] = useState('2026-10-31');
   const [printDocument, setPrintDocument] = useState<PrintDocumentType | null>(null);
-  const [driveSaved, setDriveSaved] = useState(false);
+  const [driveSaving, setDriveSaving] = useState(false);
+  const [driveSavedInfo, setDriveSavedInfo] = useState<{ message: string; link?: string } | null>(null);
 
   // Edit Mode State for the whole Report
   const [isEditMode, setIsEditMode] = useState(false);
@@ -208,10 +210,28 @@ export const BeneficiaryReportView: React.FC<BeneficiaryReportViewProps> = ({ in
   const [parentOrg, setParentOrg] = useState(templateSettings.parentOrg);
   const [agencyName, setAgencyName] = useState(templateSettings.agencyName);
   const [deptName, setDeptName] = useState(templateSettings.deptName);
+  const [nationalMottoTop, setNationalMottoTop] = useState(templateSettings.nationalMottoTop);
+  const [nationalMottoSub, setNationalMottoSub] = useState(templateSettings.nationalMottoSub);
   const [reportTitle, setReportTitle] = useState(templateSettings.reportTitle);
+  const [reportSubtitle, setReportSubtitle] = useState(templateSettings.reportSubtitle);
+  const [reportFooterNote, setReportFooterNote] = useState(templateSettings.reportFooterNote);
   const [preparerName, setPreparerName] = useState(templateSettings.preparerName);
   const [deptLeaderName, setDeptLeaderName] = useState(templateSettings.deptLeaderName);
   const [centerDirectorName, setCenterDirectorName] = useState(templateSettings.centerDirectorName);
+
+  useEffect(() => {
+    setParentOrg(templateSettings.parentOrg);
+    setAgencyName(templateSettings.agencyName);
+    setDeptName(templateSettings.deptName);
+    setNationalMottoTop(templateSettings.nationalMottoTop);
+    setNationalMottoSub(templateSettings.nationalMottoSub);
+    setReportTitle(templateSettings.reportTitle);
+    setReportSubtitle(templateSettings.reportSubtitle);
+    setReportFooterNote(templateSettings.reportFooterNote);
+    setPreparerName(templateSettings.preparerName);
+    setDeptLeaderName(templateSettings.deptLeaderName);
+    setCenterDirectorName(templateSettings.centerDirectorName);
+  }, [templateSettings]);
 
   // Custom Beneficiary Info Override
   const [customBenName, setCustomBenName] = useState('');
@@ -386,7 +406,11 @@ export const BeneficiaryReportView: React.FC<BeneficiaryReportViewProps> = ({ in
           parentOrg,
           agencyName,
           deptName,
+          nationalMottoTop,
+          nationalMottoSub,
           reportTitle,
+          reportSubtitle,
+          reportFooterNote,
           preparerName,
           deptLeaderName,
           centerDirectorName,
@@ -395,13 +419,29 @@ export const BeneficiaryReportView: React.FC<BeneficiaryReportViewProps> = ({ in
     });
   };
 
-  const handleSaveToDrive = () => {
-    if (!currentBeneficiary) return;
+  const handleSaveToDrive = async () => {
+    if (!currentBeneficiary || !isAdmin) return;
     const docCode = `BC-${customBenCode || currentBeneficiary.code}-${startDate}_${endDate}`;
-    const fileName = `BaoCao_BHYT_${customBenCode || currentBeneficiary.code}_${startDate}.pdf`;
-    syncDocumentToDrive(docCode, 'BAO_CAO_BHYT', fileName);
-    setDriveSaved(true);
-    setTimeout(() => setDriveSaved(false), 3000);
+    const fileName = `BaoCao_BHYT_${customBenCode || currentBeneficiary.code}_${startDate}.html`;
+    const reportEl = document.getElementById('beneficiary-report-canvas');
+    const htmlSnapshot = reportEl
+      ? `<!DOCTYPE html><html lang="vi"><head><meta charset="UTF-8"/><title>${docCode}</title><style>body{font-family:"Times New Roman",serif;margin:24px;}table{width:100%;border-collapse:collapse;font-size:12px;}th,td{border:1px solid #0f172a;padding:6px;}</style></head><body>${reportEl.innerHTML}</body></html>`
+      : undefined;
+
+    setDriveSaving(true);
+    setDriveSavedInfo(null);
+    const saved = await syncDocumentToDrive(docCode, 'BAO_CAO_BHYT', fileName, htmlSnapshot);
+    setDriveSaving(false);
+
+    if (saved) {
+      const msg =
+        saved.uploadChannel === 'APPS_SCRIPT'
+          ? 'Đã lưu báo cáo lên Google Drive qua Apps Script.'
+          : saved.uploadChannel === 'OAUTH_DRIVE_V3'
+          ? 'Đã lưu báo cáo lên Google Drive qua OAuth API.'
+          : 'Đã ghi nhận lưu cục bộ (chưa kết nối Google Drive cloud).';
+      setDriveSavedInfo({ message: msg, link: saved.webViewLink });
+    }
   };
 
   const handleExportCSV = () => {
@@ -585,23 +625,53 @@ export const BeneficiaryReportView: React.FC<BeneficiaryReportViewProps> = ({ in
             <span>Xuất CSV</span>
           </button>
 
-          <button
-            onClick={handleSaveToDrive}
-            className="flex items-center gap-1.5 px-3 py-1.5 border border-teal-600 text-teal-700 hover:bg-teal-50 rounded-lg text-xs font-semibold transition-colors"
-          >
-            {driveSaved ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Cloud className="w-3.5 h-3.5" />}
-            <span>{driveSaved ? 'Đã lưu Drive' : 'Lưu Drive'}</span>
-          </button>
+          {isAdmin && (
+            <button
+              onClick={handleSaveToDrive}
+              disabled={driveSaving}
+              className="flex items-center gap-1.5 px-3 py-1.5 border border-teal-600 text-teal-700 hover:bg-teal-50 rounded-lg text-xs font-semibold transition-colors disabled:opacity-50"
+            >
+              {driveSaving ? (
+                <div className="w-3.5 h-3.5 border-2 border-teal-600 border-t-transparent rounded-full animate-spin" />
+              ) : driveSavedInfo ? (
+                <Check className="w-3.5 h-3.5 text-emerald-600" />
+              ) : (
+                <Cloud className="w-3.5 h-3.5" />
+              )}
+              <span>{driveSaving ? 'Đang lưu Drive...' : 'Lưu Drive'}</span>
+            </button>
+          )}
 
           <button
             onClick={handleOpenPrint}
-            className="flex items-center gap-1.5 px-4 py-1.5 bg-teal-600 hover:bg-teal-700 text-white rounded-lg text-xs font-semibold shadow-xs transition-colors"
+            disabled={!canExportReport}
+            className="flex items-center gap-1.5 px-4 py-1.5 bg-teal-600 hover:bg-teal-700 text-white rounded-lg text-xs font-semibold shadow-xs transition-colors disabled:opacity-50"
           >
             <Printer className="w-4 h-4" />
             <span>In Báo Cáo Chuẩn A4</span>
           </button>
         </div>
       </div>
+
+      {driveSavedInfo && isAdmin && (
+        <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-900 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <Check className="w-4 h-4 text-emerald-600 shrink-0" />
+            <span>{driveSavedInfo.message}</span>
+          </div>
+          {driveSavedInfo.link && (
+            <a
+              href={driveSavedInfo.link}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 font-semibold text-teal-700 hover:underline shrink-0"
+            >
+              <span>Mở tệp trên Drive</span>
+              <ExternalLink className="w-3.5 h-3.5" />
+            </a>
+          )}
+        </div>
+      )}
 
       {/* Auto-Extraction Status Banner */}
       <div className="bg-gradient-to-r from-teal-50 via-emerald-50 to-teal-50 border border-teal-200 rounded-xl p-3 shadow-2xs flex flex-wrap items-center justify-between gap-3 text-xs">
@@ -610,10 +680,10 @@ export const BeneficiaryReportView: React.FC<BeneficiaryReportViewProps> = ({ in
             <Sparkles className="w-4 h-4" />
           </div>
           <div>
-            <div className="font-bold text-slate-800 flex items-center gap-1.5">
+            <div className="font-bold text-slate-800 flex items-center gap-2">
               <span>Hệ thống tự động trích xuất dữ liệu từ Phiếu Nhập & Phiếu Xuất kho</span>
-              <span className="px-2 py-0.5 rounded-full bg-teal-100 text-teal-800 text-2xs font-bold">
-                {rows.length} mặt hàng thuốc
+              <span className="text-teal-800 font-mono text-2xs tabular-nums">
+                ({rows.length} mặt hàng thuốc)
               </span>
             </div>
             <div className="text-2xs text-slate-600 mt-0.5">
@@ -674,7 +744,7 @@ export const BeneficiaryReportView: React.FC<BeneficiaryReportViewProps> = ({ in
       )}
 
       {/* Official Report Container */}
-      <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-2xs overflow-x-auto">
+      <div id="beneficiary-report-canvas" className="bg-white rounded-xl border border-slate-200 p-6 shadow-2xs overflow-x-auto">
         {/* Administrative Header */}
         <div className="flex justify-between items-start mb-4 pb-4 border-b border-slate-100">
           <div>
@@ -711,22 +781,53 @@ export const BeneficiaryReportView: React.FC<BeneficiaryReportViewProps> = ({ in
             )}
           </div>
           <div className="text-right">
-            <div className="font-bold text-xs uppercase text-slate-900">CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM</div>
-            <div className="text-xs italic text-slate-600 font-medium">Độc lập - Tự do - Hạnh phúc</div>
+            {isEditMode ? (
+              <div className="space-y-1 w-72">
+                <input
+                  type="text"
+                  value={nationalMottoTop}
+                  onChange={(e) => setNationalMottoTop(e.target.value)}
+                  className="w-full text-right text-xs font-bold uppercase p-1 border border-amber-300 rounded bg-amber-50/50"
+                />
+                <input
+                  type="text"
+                  value={nationalMottoSub}
+                  onChange={(e) => setNationalMottoSub(e.target.value)}
+                  className="w-full text-right text-xs italic font-medium p-1 border border-amber-300 rounded bg-amber-50/50"
+                />
+              </div>
+            ) : (
+              <>
+                <div className="font-bold text-xs uppercase text-slate-900">{nationalMottoTop}</div>
+                <div className="text-xs italic text-slate-600 font-medium">{nationalMottoSub}</div>
+              </>
+            )}
           </div>
         </div>
 
         {/* Title & Beneficiary Info */}
         <div className="text-center my-4">
           {isEditMode ? (
-            <input
-              type="text"
-              value={reportTitle}
-              onChange={(e) => setReportTitle(e.target.value)}
-              className="w-full max-w-2xl text-center text-sm font-bold uppercase p-1.5 border border-amber-300 rounded bg-amber-50/50"
-            />
+            <div className="space-y-1.5 max-w-2xl mx-auto">
+              <input
+                type="text"
+                value={reportTitle}
+                onChange={(e) => setReportTitle(e.target.value)}
+                className="w-full text-center text-sm font-bold uppercase p-1.5 border border-amber-300 rounded bg-amber-50/50"
+              />
+              <input
+                type="text"
+                value={reportSubtitle}
+                onChange={(e) => setReportSubtitle(e.target.value)}
+                className="w-full text-center text-xs p-1 border border-amber-300 rounded bg-amber-50/50"
+                placeholder="Mô tả phụ dưới tiêu đề..."
+              />
+            </div>
           ) : (
-            <h2 className="text-base sm:text-lg font-bold uppercase tracking-wide text-slate-900">{reportTitle}</h2>
+            <>
+              <h2 className="text-base sm:text-lg font-bold uppercase tracking-wide text-slate-900">{reportTitle}</h2>
+              {reportSubtitle && <div className="text-xs text-slate-600 mt-0.5">{reportSubtitle}</div>}
+            </>
           )}
 
           <div className="text-xs italic text-slate-500 mt-1">
@@ -782,47 +883,42 @@ export const BeneficiaryReportView: React.FC<BeneficiaryReportViewProps> = ({ in
           <table className="w-full text-2xs border-collapse border border-slate-300 text-left">
             <thead>
               <tr className="bg-slate-100 font-bold text-center text-slate-800">
-                <th rowSpan={2} className="border border-slate-300 p-2 w-8">STT</th>
-                <th rowSpan={2} className="border border-slate-300 p-2 min-w-48">Tên thuốc và hàm lượng</th>
-                <th rowSpan={2} className="border border-slate-300 p-2 w-12 text-center">ĐVT</th>
+                <th rowSpan={2} className="border border-slate-300 p-2 w-8">{templateSettings.reportColStt}</th>
+                <th rowSpan={2} className="border border-slate-300 p-2 min-w-48">{templateSettings.reportColName}</th>
+                <th rowSpan={2} className="border border-slate-300 p-2 w-12 text-center">{templateSettings.reportColUnit}</th>
                 <th colSpan={3} className="border border-slate-300 p-1.5 bg-amber-50/70 text-amber-900">
-                  Tồn đầu kỳ
+                  {templateSettings.reportGroupOpening}
                 </th>
                 <th colSpan={3} className="border border-slate-300 p-1.5 bg-blue-50/70 text-blue-900">
-                  Nhập trong kỳ
+                  {templateSettings.reportGroupIn}
                 </th>
                 <th colSpan={3} className="border border-slate-300 p-1.5 bg-indigo-50/70 text-indigo-900">
-                  Tổng nhập (= Tồn đầu + Nhập)
+                  {templateSettings.reportGroupTotalIn}
                 </th>
                 <th colSpan={3} className="border border-slate-300 p-1.5 bg-rose-50/70 text-rose-900">
-                  Xuất trong kỳ
+                  {templateSettings.reportGroupOut}
                 </th>
                 <th colSpan={3} className="border border-slate-300 p-1.5 bg-emerald-50/70 text-emerald-900">
-                  Tồn cuối kỳ (= Tổng nhập - Xuất)
+                  {templateSettings.reportGroupClosing}
                 </th>
                 {isEditMode && <th rowSpan={2} className="border border-slate-300 p-1 w-10 text-center">Xóa</th>}
               </tr>
               <tr className="bg-slate-50 font-semibold text-center text-3xs text-slate-600">
-                {/* Tồn đầu */}
-                <th className="border border-slate-300 p-1 w-10">SL</th>
-                <th className="border border-slate-300 p-1 w-14">Đơn giá</th>
-                <th className="border border-slate-300 p-1 w-16">Thành tiền</th>
-                {/* Nhập */}
-                <th className="border border-slate-300 p-1 w-10">SL</th>
-                <th className="border border-slate-300 p-1 w-14">Đơn giá</th>
-                <th className="border border-slate-300 p-1 w-16">Thành tiền</th>
-                {/* Tổng nhập */}
-                <th className="border border-slate-300 p-1 w-10 font-bold text-indigo-900">SL</th>
-                <th className="border border-slate-300 p-1 w-14">Đơn giá</th>
-                <th className="border border-slate-300 p-1 w-16 font-bold text-indigo-900">Thành tiền</th>
-                {/* Xuất */}
-                <th className="border border-slate-300 p-1 w-10">SL</th>
-                <th className="border border-slate-300 p-1 w-14">Đơn giá</th>
-                <th className="border border-slate-300 p-1 w-16">Thành tiền</th>
-                {/* Tồn cuối */}
-                <th className="border border-slate-300 p-1 w-10 font-bold text-teal-900">SL</th>
-                <th className="border border-slate-300 p-1 w-14">Đơn giá</th>
-                <th className="border border-slate-300 p-1 w-16 font-bold text-teal-900">Thành tiền</th>
+                <th className="border border-slate-300 p-1 w-10">{templateSettings.reportSubColQty}</th>
+                <th className="border border-slate-300 p-1 w-14">{templateSettings.reportSubColPrice}</th>
+                <th className="border border-slate-300 p-1 w-16">{templateSettings.reportSubColAmount}</th>
+                <th className="border border-slate-300 p-1 w-10">{templateSettings.reportSubColQty}</th>
+                <th className="border border-slate-300 p-1 w-14">{templateSettings.reportSubColPrice}</th>
+                <th className="border border-slate-300 p-1 w-16">{templateSettings.reportSubColAmount}</th>
+                <th className="border border-slate-300 p-1 w-10 font-bold text-indigo-900">{templateSettings.reportSubColQty}</th>
+                <th className="border border-slate-300 p-1 w-14">{templateSettings.reportSubColPrice}</th>
+                <th className="border border-slate-300 p-1 w-16 font-bold text-indigo-900">{templateSettings.reportSubColAmount}</th>
+                <th className="border border-slate-300 p-1 w-10">{templateSettings.reportSubColQty}</th>
+                <th className="border border-slate-300 p-1 w-14">{templateSettings.reportSubColPrice}</th>
+                <th className="border border-slate-300 p-1 w-16">{templateSettings.reportSubColAmount}</th>
+                <th className="border border-slate-300 p-1 w-10 font-bold text-teal-900">{templateSettings.reportSubColQty}</th>
+                <th className="border border-slate-300 p-1 w-14">{templateSettings.reportSubColPrice}</th>
+                <th className="border border-slate-300 p-1 w-16 font-bold text-teal-900">{templateSettings.reportSubColAmount}</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-200">
@@ -996,7 +1092,7 @@ export const BeneficiaryReportView: React.FC<BeneficiaryReportViewProps> = ({ in
               {rows.length > 0 && (
                 <tr className="font-bold bg-slate-100 text-slate-900 border-t-2 border-slate-400">
                   <td colSpan={3} className="border border-slate-300 p-2 text-center uppercase">
-                    Cộng tổng số:
+                    {templateSettings.reportGrandTotalLabel}
                   </td>
 
                   {/* Tồn đầu */}
@@ -1051,10 +1147,24 @@ export const BeneficiaryReportView: React.FC<BeneficiaryReportViewProps> = ({ in
         </div>
 
         {/* Footnote and Signatures (Editable) */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 text-center text-xs mt-8 pt-4 border-t border-slate-100">
+        <div className="mt-4">
+          {isEditMode ? (
+            <input
+              type="text"
+              value={reportFooterNote}
+              onChange={(e) => setReportFooterNote(e.target.value)}
+              className="w-full text-2xs italic p-1.5 border border-amber-300 rounded bg-amber-50/50 text-slate-700"
+              placeholder="Ghi chú cuối báo cáo..."
+            />
+          ) : (
+            reportFooterNote && <div className="text-2xs italic text-slate-600">{reportFooterNote}</div>
+          )}
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 text-center text-xs mt-6 pt-4 border-t border-slate-100">
           <div>
-            <div className="font-bold uppercase text-slate-800">Người lập biểu</div>
-            <div className="text-2xs italic text-slate-500">(Ký, họ tên)</div>
+            <div className="font-bold uppercase text-slate-800">{templateSettings.preparerTitle}</div>
+            <div className="text-2xs italic text-slate-500">{templateSettings.preparerSignNote}</div>
             <div className="h-14 flex items-center justify-center">
               {isEditMode ? (
                 <input
@@ -1069,8 +1179,8 @@ export const BeneficiaryReportView: React.FC<BeneficiaryReportViewProps> = ({ in
           </div>
 
           <div>
-            <div className="font-bold uppercase text-slate-800">Phụ trách Phòng Y tế - PHCN</div>
-            <div className="text-2xs italic text-slate-500">(Ký, họ tên)</div>
+            <div className="font-bold uppercase text-slate-800">{templateSettings.deptLeaderTitle}</div>
+            <div className="text-2xs italic text-slate-500">{templateSettings.deptLeaderSignNote}</div>
             <div className="h-14 flex items-center justify-center">
               {isEditMode ? (
                 <input
@@ -1085,8 +1195,8 @@ export const BeneficiaryReportView: React.FC<BeneficiaryReportViewProps> = ({ in
           </div>
 
           <div>
-            <div className="font-bold uppercase text-slate-800">Thủ trưởng đơn vị</div>
-            <div className="text-2xs italic text-slate-500">(Ký, họ tên, đóng dấu)</div>
+            <div className="font-bold uppercase text-slate-800">{templateSettings.centerDirectorTitle}</div>
+            <div className="text-2xs italic text-slate-500">{templateSettings.centerDirectorSignNote}</div>
             <div className="h-14 flex items-center justify-center">
               {isEditMode ? (
                 <input

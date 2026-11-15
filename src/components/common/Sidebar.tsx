@@ -4,7 +4,15 @@
  */
 
 import React from 'react';
-import { PackagePlus, PackageMinus, FileSpreadsheet, Sliders, Users, ShieldAlert } from 'lucide-react';
+import {
+  PackagePlus,
+  PackageMinus,
+  FileSpreadsheet,
+  Sliders,
+  Users,
+  ShieldAlert,
+  Cloud,
+} from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 
 interface SidebarProps {
@@ -13,24 +21,25 @@ interface SidebarProps {
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => {
-  const { receipts, issues, users, hasPermission } = useApp();
+  const { receipts, issues, users, currentUser, hasPermission, templateSettings } = useApp();
 
   const pendingUsersCount = users.filter((u) => u.status === 'PENDING_APPROVAL').length;
+  const canManageSync = currentUser?.role === 'ADMIN' && hasPermission('canManageSync');
 
   const menuItems = [
     {
       id: 'stock-receipts',
       label: 'Phiếu Nhập',
-      fullLabel: 'Phiếu Nhập Kho (C20-HD)',
+      fullLabel: `Phiếu Nhập Kho (${templateSettings.receiptFormCode.replace('Mẫu số:', '').trim() || 'C20-HD'})`,
       icon: PackagePlus,
-      badge: `${receipts.length}`,
+      countText: `${receipts.length}`,
     },
     {
       id: 'stock-issues',
       label: 'Phiếu Xuất',
-      fullLabel: 'Phiếu Xuất Kho (C21-HD)',
+      fullLabel: `Phiếu Xuất Kho (${templateSettings.issueFormCode.replace('Mẫu số:', '').trim() || 'C21-HD'})`,
       icon: PackageMinus,
-      badge: `${issues.length}`,
+      countText: `${issues.length}`,
     },
     {
       id: 'beneficiary-report',
@@ -43,8 +52,8 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
       label: 'Phân Quyền & Cán Bộ',
       fullLabel: 'Quản Lý Người Dùng & Vai Trò',
       icon: Users,
-      badge: pendingUsersCount > 0 ? `${pendingUsersCount} chờ` : undefined,
-      badgeColor: pendingUsersCount > 0 ? 'bg-amber-500 text-slate-950 font-bold' : undefined,
+      countText: pendingUsersCount > 0 ? `${pendingUsersCount} chờ` : undefined,
+      highlightAmber: pendingUsersCount > 0,
     },
     {
       id: 'template-settings',
@@ -52,6 +61,16 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
       fullLabel: 'Hiệu Chỉnh Biểu Mẫu Mặc Định',
       icon: Sliders,
     },
+    ...(canManageSync
+      ? [
+          {
+            id: 'sync',
+            label: 'Đồng Bộ Sheets & Drive',
+            fullLabel: 'Sao Lưu Google Workspace (Admin)',
+            icon: Cloud,
+          },
+        ]
+      : []),
     {
       id: 'audit',
       label: 'Nhật Ký Kiểm Toán',
@@ -66,14 +85,14 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
         <div className="w-9 h-9 rounded-lg bg-teal-500/20 text-teal-400 flex items-center justify-center font-bold text-base border border-teal-500/30">
           BT
         </div>
-        <div>
-          <div className="text-xs font-bold text-white tracking-wide uppercase">Biểu Mẫu Kho Dược</div>
-          <div className="text-2xs text-slate-400">TT Bảo Trợ Xã Hội Đà Nẵng</div>
+        <div className="min-w-0">
+          <div className="text-xs font-bold text-white tracking-wide truncate">Biểu Mẫu Kho Dược</div>
+          <div className="text-2xs text-slate-400 truncate">{templateSettings.agencyName}</div>
         </div>
       </div>
 
-      <nav className="flex-1 px-3 py-6 space-y-2">
-        <div className="px-3 mb-3 text-2xs font-semibold tracking-wider text-slate-400 uppercase">
+      <nav className="flex-1 px-3 py-5 space-y-1.5 overflow-y-auto">
+        <div className="px-3 mb-2 text-2xs font-semibold tracking-wide text-slate-400">
           Biểu Mẫu Nghiệp Vụ
         </div>
 
@@ -84,29 +103,33 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
             <button
               key={item.id}
               onClick={() => setActiveTab(item.id)}
-              className={`w-full flex items-center justify-between px-3.5 py-3 rounded-xl text-xs font-medium transition-all ${
+              className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-xs font-medium transition-colors ${
                 isActive
                   ? 'bg-teal-600 text-white shadow-md font-semibold'
                   : 'text-slate-300 hover:text-white hover:bg-slate-800/80'
               }`}
             >
-              <div className="flex items-center gap-3">
+              <div className="flex items-center gap-3 min-w-0">
                 <Icon className={`w-5 h-5 shrink-0 ${isActive ? 'text-white' : 'text-teal-400'}`} />
-                <div className="text-left">
-                  <div className="font-semibold text-sm">{item.label}</div>
-                  <div className={`text-2xs ${isActive ? 'text-teal-100' : 'text-slate-400'}`}>
+                <div className="text-left min-w-0">
+                  <div className="font-semibold text-sm truncate">{item.label}</div>
+                  <div className={`text-2xs truncate ${isActive ? 'text-teal-100' : 'text-slate-400'}`}>
                     {item.fullLabel}
                   </div>
                 </div>
               </div>
 
-              {item.badge && (
+              {item.countText && (
                 <span
-                  className={`px-2 py-0.5 rounded-full text-2xs font-mono font-bold ${
-                    isActive ? 'bg-white text-teal-800' : 'bg-slate-800 text-slate-400'
+                  className={`text-2xs font-mono tabular-nums font-semibold shrink-0 ml-2 ${
+                    isActive
+                      ? 'text-white'
+                      : item.highlightAmber
+                      ? 'text-amber-400'
+                      : 'text-slate-400'
                   }`}
                 >
-                  {item.badge}
+                  {item.countText}
                 </span>
               )}
             </button>
@@ -117,10 +140,10 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
       {/* Footer Info */}
       <div className="p-4 border-t border-slate-800 text-2xs text-slate-400 space-y-1">
         <div className="flex justify-between items-center">
-          <span>Mã QHNS: 1041008</span>
+          <span className="font-mono tabular-nums">Mã QHNS: {templateSettings.qhnsCode}</span>
           <span className="text-teal-400 font-semibold">Khổ A4 Chuẩn</span>
         </div>
-        <div className="text-slate-500">Phòng Y Tế - Phục Hồi Chức Năng</div>
+        <div className="text-slate-500 truncate">{templateSettings.deptName}</div>
       </div>
     </aside>
   );

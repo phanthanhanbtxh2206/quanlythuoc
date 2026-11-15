@@ -1,0 +1,158 @@
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+export interface GoogleDriveUploadResult {
+  success: boolean;
+  fileId?: string;
+  webViewLink?: string;
+  folderId?: string;
+  error?: string;
+}
+
+/**
+ * Find or create a single Google Drive folder under a parent folder ID
+ */
+const getOrCreateSingleFolder = async (
+  accessToken: string,
+  folderName: string,
+  parentId?: string
+): Promise<string> => {
+  const cleanName = folderName.replace(/'/g, "\\'").trim();
+  const qParts = [
+    `name = '${cleanName}'`,
+    `mimeType = 'application/vnd.google-apps.folder'`,
+    `trashed = false`,
+  ];
+  if (parentId) {
+    qParts.push(`'${parentId}' in parents`);
+  }
+
+  const query = encodeURIComponent(qParts.join(' and '));
+  const searchRes = await fetch(
+    `https://www.googleapis.com/drive/v3/files?q=${query}&fields=files(id,name)&pageSize=1`,
+    {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    }
+  );
+
+  if (searchRes.ok) {
+    const searchData = await searchRes.json();
+    if (searchData.files && searchData.files.length > 0) {
+      return searchData.files[0].id;
+    }
+  }
+
+  const createBody: Record<string, any> = {
+    name: folderName.trim(),
+    mimeType: 'application/vnd.google-apps.folder',
+  };
+  if (parentId) {
+    createBody.parents = [parentId];
+  }
+
+  const createRes = await fetch('https://www.googleapis.com/drive/v3/files?fields=id,name', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(createBody),
+  });
+
+  if (!createRes.ok) {
+    const errText = await createRes.text();
+    throw new Error(`Không thể tạo thư mục "${folderName}" trên Google Drive (${createRes.status}): ${errText}`);
+  }
+
+  const created = await createRes.json();
+  return created.id;
+};
+
+/**
+ * Traverse/create nested folder hierarchy (e.g., "QUAN_LY_THUOC_TRUNG_TAM/2026/PHIEU_NHAP")
+ */
+export const ensureDriveFolderPath = async (
+  accessToken: string,
+  folderPath: string
+): Promise<string | undefined> => {
+  const segments = (folderPath || '')
+    .split('/')
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  if (segments.length === 0) return undefined;
+
+  let currentParentId: string | undefined = undefined;
+  for (const seg of segments) {
+    currentParentId = await getOrCreateSingleFolder(accessToken, seg, currentParentId);
+  }
+  return currentParentId;
+};
+
+/**
+ * Upload real file content (HTML/JSON/CSV) to Google Drive v3 using multipart upload
+ */
+export const uploadFileToGoogleDrive = async (
+  accessToken: string,
+  folderPath: string,
+  fileName: string,
+  content: string,
+  mimeType = 'text/html'
+): Promise<GoogleDriveUploadResult> => {
+  try {
+    const folderId = await ensureDriveFolderPath(accessToken, folderPath);
+
+    const metadata: Record<string, any> = {
+      name: fileName,
+      mimeType,
+    };
+    if (folderId) {
+      metadata.parents = [folderId];
+    }
+
+    const boundary = 'btxh_drive_boundary_' + Date.now();
+    const multipartBody =
+      `--${boundary}\r\n` +
+      `Content-Type: application/json; charset=UTF-8\r\n\r\n` +
+      `${JSON.stringify(metadata)}\r\n` +
+      `--${boundary}\r\n` +
+      `Content-Type: ${mimeType}; charset=UTF-8\r\n\r\n` +
+      `${content}\r\n` +
+      `--${boundary}--`;
+
+    const uploadRes = await fetch(
+      'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,webViewLink',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': `multipart/related; boundary=${boundary}`,
+        },
+        body: multipartBody,
+      }
+    );
+
+    if (!uploadRes.ok) {
+      const errText = await uploadRes.text();
+      return {
+        success: false,
+        error: `Google Drive API trả về lỗi (${uploadRes.status}): ${errText}`,
+      };
+    }
+
+    const fileData = await uploadRes.json();
+    return {
+      success: true,
+      fileId: fileData.id,
+      webViewLink: fileData.webViewLink || `https://drive.google.com/file/d/${fileData.id}/view`,
+      folderId,
+    };
+  } catch (err: any) {
+    return {
+      success: false,
+      error: err?.message || 'Lỗi tải tệp lên Google Drive.',
+    };
+  }
+};

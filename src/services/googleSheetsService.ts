@@ -11,6 +11,7 @@ export interface GoogleSheetsSyncResult {
   spreadsheetId: string;
   spreadsheetUrl: string;
   timestamp: string;
+  channel?: 'APPS_SCRIPT' | 'OAUTH';
   rowCounts: {
     receipts: number;
     issues: number;
@@ -18,6 +19,24 @@ export interface GoogleSheetsSyncResult {
   };
   error?: string;
 }
+
+export const GOOGLE_SAMPLE_READONLY_ID = '1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms';
+
+/**
+ * Extract Spreadsheet ID from either a full Google Sheets URL or a bare ID string.
+ */
+export const extractSpreadsheetId = (urlOrId?: string): string => {
+  const clean = (urlOrId || '').trim();
+  if (!clean) return '';
+  const match = clean.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+  if (match && match[1]) {
+    return match[1];
+  }
+  if (/^[a-zA-Z0-9-_]{20,}$/.test(clean)) {
+    return clean;
+  }
+  return '';
+};
 
 /**
  * Convert JSON array of objects to 2D array for Google Sheets API
@@ -34,6 +53,19 @@ const jsonTo2DArray = (rows: Record<string, any>[]): any[][] => {
   return [headers, ...values];
 };
 
+const translateSheetsApiError = (status: number, rawBody: string, context: string): string => {
+  if (status === 401) {
+    return `Phiên đăng nhập Google OAuth đã hết hạn hoặc bị thu hồi (401). Vui lòng bấm "Kết nối lại Google" hoặc chuyển sang dùng Google Apps Script để đồng bộ không giới hạn thời gian.`;
+  }
+  if (status === 403) {
+    return `Không có quyền ghi vào bảng tính này (403 - Giới hạn phạm vi drive.file). Với chế độ Google OAuth, ứng dụng chỉ ghi được bảng tính do chính ứng dụng tạo mới hoặc bảng tính đã gắn Google Apps Script Bridge. Hãy xóa link cũ để tạo bảng tính mới hoặc cài Apps Script URL.`;
+  }
+  if (status === 404) {
+    return `Không tìm thấy Google Spreadsheet theo ID đã cấu hình (404). Hệ thống có thể tự tạo bảng tính mới nếu bạn xóa ID cũ.`;
+  }
+  return `${context} (${status}): ${rawBody.slice(0, 220)}`;
+};
+
 /**
  * Ensure the Google Spreadsheet exists and contains the 3 sheets:
  * "Phiếu nhập", "Phiếu xuất", "Báo cáo"
@@ -46,61 +78,76 @@ export const ensurePharmacySpreadsheet = async (
   const defaultTitle =
     title || 'Sổ Quản Lý Dược Phẩm & Cấp Phát Thuốc - TTBTXH (Tự Động Sao Lưu)';
 
-  // 1. If an ID is provided, test if the spreadsheet exists and is accessible
-  if (existingSpreadsheetId) {
-    try {
-      const checkRes = await fetch(
-        `https://sheets.googleapis.com/v4/spreadsheets/${existingSpreadsheetId}?fields=spreadsheetId,properties.title,sheets.properties`,
-        {
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-          },
-        }
+  const candidateId = extractSpreadsheetId(existingSpreadsheetId);
+
+  // 1. If an ID is provided (and not Google's public sample sheet), test accessibility
+  if (candidateId && candidateId !== GOOGLE_SAMPLE_READONLY_ID) {
+    const checkRes = await fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${candidateId}?fields=spreadsheetId,properties.title,sheets.properties`,
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      }
+    );
+
+    if (checkRes.ok) {
+      const meta = await checkRes.json();
+      const existingSheetTitles: string[] = (meta.sheets || []).map(
+        (s: any) => s.properties?.title
       );
 
-      if (checkRes.ok) {
-        const meta = await checkRes.json();
-        const existingSheetTitles: string[] = (meta.sheets || []).map(
-          (s: any) => s.properties?.title
-        );
+      // Ensure all 3 required sheets exist
+      const requiredSheets = ['Phiếu nhập', 'Phiếu xuất', 'Báo cáo'];
+      const missingSheets = requiredSheets.filter((s) => !existingSheetTitles.includes(s));
 
-        // Ensure all 3 required sheets exist
-        const requiredSheets = ['Phiếu nhập', 'Phiếu xuất', 'Báo cáo'];
-        const missingSheets = requiredSheets.filter((s) => !existingSheetTitles.includes(s));
-
-        if (missingSheets.length > 0) {
-          const addRequests = missingSheets.map((sheetTitle) => ({
-            addSheet: {
-              properties: {
-                title: sheetTitle,
-                gridProperties: {
-                  frozenRowCount: 1,
-                },
+      if (missingSheets.length > 0) {
+        const addRequests = missingSheets.map((sheetTitle) => ({
+          addSheet: {
+            properties: {
+              title: sheetTitle,
+              gridProperties: {
+                frozenRowCount: 1,
               },
             },
-          }));
+          },
+        }));
 
-          await fetch(
-            `https://sheets.googleapis.com/v4/spreadsheets/${existingSpreadsheetId}:batchUpdate`,
-            {
-              method: 'POST',
-              headers: {
-                Authorization: `Bearer ${accessToken}`,
-                'Content-Type': 'application/json',
-              },
-              body: JSON.stringify({ requests: addRequests }),
-            }
+        const addRes = await fetch(
+          `https://sheets.googleapis.com/v4/spreadsheets/${candidateId}:batchUpdate`,
+          {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ requests: addRequests }),
+          }
+        );
+
+        if (!addRes.ok) {
+          const errText = await addRes.text();
+          throw new Error(
+            translateSheetsApiError(addRes.status, errText, 'Lỗi thêm trang tính vào Google Sheets')
           );
         }
-
-        return {
-          id: existingSpreadsheetId,
-          url: `https://docs.google.com/spreadsheets/d/${existingSpreadsheetId}/edit`,
-          createdNew: false,
-        };
       }
-    } catch (e) {
-      console.warn('Không thể tái sử dụng Google Spreadsheet cũ, sẽ tạo mới:', e);
+
+      return {
+        id: candidateId,
+        url: `https://docs.google.com/spreadsheets/d/${candidateId}/edit`,
+        createdNew: false,
+      };
+    }
+
+    if (checkRes.status === 401) {
+      const errText = await checkRes.text();
+      throw new Error(translateSheetsApiError(401, errText, 'Lỗi xác thực Google'));
+    }
+
+    if (checkRes.status === 403) {
+      // Bảng tính do người dùng tạo thủ công bên ngoài không nằm trong phạm vi drive.file -> giải thích rõ và tạo bảng tính mới thuộc ứng dụng
+      console.warn('Spreadsheet bên ngoài trả về 403 với scope drive.file, đang tạo bảng tính thuộc quyền ứng dụng...');
     }
   }
 
@@ -142,7 +189,9 @@ export const ensurePharmacySpreadsheet = async (
 
   if (!createRes.ok) {
     const errorDetails = await createRes.text();
-    throw new Error(`Lỗi tạo Google Spreadsheet mới (${createRes.status}): ${errorDetails}`);
+    throw new Error(
+      translateSheetsApiError(createRes.status, errorDetails, 'Lỗi tạo Google Spreadsheet mới')
+    );
   }
 
   const createdData = await createRes.json();
@@ -156,7 +205,7 @@ export const ensurePharmacySpreadsheet = async (
 };
 
 /**
- * Automatically synchronize all pharmacy data to Google Sheets across 3 sheets.
+ * Automatically synchronize all pharmacy data to Google Sheets across 3 sheets via OAuth token.
  */
 export const syncAllDataToGoogleSheets = async (
   accessToken: string,
@@ -180,14 +229,13 @@ export const syncAllDataToGoogleSheets = async (
   const issueValues = jsonTo2DArray(issueSheetRows);
   const reportValues = jsonTo2DArray(reportSheetRows);
 
-  // 2. Ensure spreadsheet exists
-  const title = `Sổ Quản Lý Dược Phẩm & Cấp Phát Thuốc - ${templateSettings.agencyName || 'TTBTXH'}`;
-  const spreadsheet = await ensurePharmacySpreadsheet(
-    accessToken,
-    (templateSettings as any).googleSpreadsheetId,
-    title
-  );
+  // 2. Resolve target spreadsheet ID from either googleSpreadsheetId or pasted googleSheetUrl
+  const resolvedExistingId =
+    extractSpreadsheetId(templateSettings.googleSpreadsheetId) ||
+    extractSpreadsheetId(templateSettings.googleSheetUrl);
 
+  const title = `Sổ Quản Lý Dược Phẩm & Cấp Phát Thuốc - ${templateSettings.agencyName || 'TTBTXH'}`;
+  const spreadsheet = await ensurePharmacySpreadsheet(accessToken, resolvedExistingId, title);
   const spreadsheetId = spreadsheet.id;
 
   // 3. Clear existing values to prevent stale trailing cells
@@ -242,7 +290,9 @@ export const syncAllDataToGoogleSheets = async (
 
   if (!updateRes.ok) {
     const errText = await updateRes.text();
-    throw new Error(`Lỗi cập nhật dữ liệu Google Sheets (${updateRes.status}): ${errText}`);
+    throw new Error(
+      translateSheetsApiError(updateRes.status, errText, 'Lỗi cập nhật dữ liệu Google Sheets')
+    );
   }
 
   const now = new Date();
@@ -253,6 +303,7 @@ export const syncAllDataToGoogleSheets = async (
     spreadsheetId,
     spreadsheetUrl: spreadsheet.url,
     timestamp,
+    channel: 'OAUTH',
     rowCounts: {
       receipts: Math.max(0, receiptValues.length - 1),
       issues: Math.max(0, issueValues.length - 1),

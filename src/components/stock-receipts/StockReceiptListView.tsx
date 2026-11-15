@@ -23,6 +23,7 @@ export const StockReceiptListView: React.FC = () => {
     addMedicine,
     hasPermission,
     currentUser,
+    templateSettings,
   } = useApp();
 
   const canCreateReceipt = hasPermission('canCreateReceipt');
@@ -309,9 +310,11 @@ export const StockReceiptListView: React.FC = () => {
       {/* Header and Actions */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white p-4 rounded-xl border border-slate-200 shadow-2xs">
         <div>
-          <h2 className="font-bold text-slate-900 text-base">Quản Lý Phiếu Nhập Kho (Mẫu C20-HD)</h2>
+          <h2 className="font-bold text-slate-900 text-base">
+            Quản Lý {templateSettings.receiptTitle} ({templateSettings.receiptFormCode})
+          </h2>
           <p className="text-xs text-slate-500 mt-0.5">
-            Đơn vị: TRUNG TÂM BẢO TRỢ XÃ HỘI · PHÒNG Y TẾ - PHCN · Mã QHNS: 1041008
+            Đơn vị: {templateSettings.agencyName} · {templateSettings.deptName} · Mã QHNS: {templateSettings.qhnsCode}
           </p>
         </div>
 
@@ -443,7 +446,7 @@ export const StockReceiptListView: React.FC = () => {
       <Modal
         isOpen={isModalOpen}
         onClose={() => setIsModalOpen(false)}
-        title={editingReceipt ? `Hiệu Chỉnh Phiếu Nhập Kho (${editingReceipt.receiptCode})` : 'Lập Phiếu Nhập Kho Mới (Mẫu C20-HD)'}
+        title={editingReceipt ? `Hiệu Chỉnh ${templateSettings.receiptTitle} (${editingReceipt.receiptCode})` : `Lập ${templateSettings.receiptTitle} Mới (${templateSettings.receiptFormCode})`}
         subtitle="Người dùng có thể sửa đổi đầy đủ thông tin chứng từ, hóa đơn, đối tượng và từng dòng mặt hàng thuốc"
         maxWidth="5xl"
       >
@@ -843,11 +846,11 @@ export const StockReceiptListView: React.FC = () => {
           {/* Total & Words */}
           <div className="bg-slate-50 p-4 rounded-lg border border-slate-200 space-y-2">
             <div className="flex justify-between items-center text-sm">
-              <span className="font-bold text-slate-800 uppercase">Cộng tổng thành tiền:</span>
-              <span className="text-lg font-bold font-mono text-teal-700">{formatCurrency(totalAmount)}</span>
+              <span className="font-bold text-slate-800 uppercase">{templateSettings.totalAmountLabel}</span>
+              <span className="text-lg font-bold font-mono text-teal-700 tabular-nums">{formatCurrency(totalAmount)}</span>
             </div>
             <div className="text-xs text-slate-600">
-              Tổng số tiền bằng chữ:{' '}
+              {templateSettings.totalAmountWordsLabel}{' '}
               <span className="font-bold italic text-slate-900">{numberToVietnameseWords(totalAmount)}</span>
             </div>
           </div>

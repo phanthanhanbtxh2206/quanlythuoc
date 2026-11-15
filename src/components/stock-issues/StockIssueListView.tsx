@@ -24,6 +24,7 @@ export const StockIssueListView: React.FC = () => {
     getAvailableLots,
     hasPermission,
     currentUser,
+    templateSettings,
   } = useApp();
 
   const canCreateIssue = hasPermission('canCreateIssue');
@@ -375,9 +376,11 @@ export const StockIssueListView: React.FC = () => {
       {/* Header and Actions */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white p-4 rounded-xl border border-slate-200 shadow-2xs">
         <div>
-          <h2 className="font-bold text-slate-900 text-base">Quản Lý Phiếu Xuất Kho (Mẫu C21-HD)</h2>
+          <h2 className="font-bold text-slate-900 text-base">
+            Quản Lý {templateSettings.issueTitle} ({templateSettings.issueFormCode})
+          </h2>
           <p className="text-xs text-slate-500 mt-0.5">
-            Đơn vị: TRUNG TÂM BẢO TRỢ XÃ HỘI · PHÒNG Y TẾ - PHCN · Mã QHNS: 1041008
+            Đơn vị: {templateSettings.agencyName} · {templateSettings.deptName} · Mã QHNS: {templateSettings.qhnsCode}
           </p>
         </div>
 
@@ -504,7 +507,7 @@ export const StockIssueListView: React.FC = () => {
       <Modal
         isOpen={isModalOpen}
         onClose={() => setIsModalOpen(false)}
-        title={editingIssue ? `Hiệu Chỉnh Phiếu Xuất Kho (${editingIssue.issueCode})` : 'Lập Phiếu Xuất Kho Mới (Mẫu C21-HD)'}
+        title={editingIssue ? `Hiệu Chỉnh ${templateSettings.issueTitle} (${editingIssue.issueCode})` : `Lập ${templateSettings.issueTitle} Mới (${templateSettings.issueFormCode})`}
         subtitle="Người dùng có thể sửa đổi người nhận, đối tượng, lý do xuất và từng dòng số lô xuất kho"
         maxWidth="5xl"
       >
@@ -782,11 +785,11 @@ export const StockIssueListView: React.FC = () => {
           {/* Total & Words */}
           <div className="bg-slate-50 p-4 rounded-lg border border-slate-200 space-y-2">
             <div className="flex justify-between items-center text-sm">
-              <span className="font-bold text-slate-800 uppercase">Cộng tổng tiền xuất kho:</span>
-              <span className="text-lg font-bold font-mono text-teal-700">{formatCurrency(totalAmount)}</span>
+              <span className="font-bold text-slate-800 uppercase">{templateSettings.totalAmountLabel}</span>
+              <span className="text-lg font-bold font-mono text-teal-700 tabular-nums">{formatCurrency(totalAmount)}</span>
             </div>
             <div className="text-xs text-slate-600">
-              Tổng số tiền bằng chữ:{' '}
+              {templateSettings.totalAmountWordsLabel}{' '}
               <span className="font-bold italic text-slate-900">{numberToVietnameseWords(totalAmount)}</span>
             </div>
           </div>

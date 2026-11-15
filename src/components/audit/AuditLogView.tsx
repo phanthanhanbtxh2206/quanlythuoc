@@ -57,8 +57,8 @@ export const AuditLogView: React.FC = () => {
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
-            {filteredLogs.map((log) => (
-              <tr key={log.id} className="hover:bg-slate-50/70">
+            {filteredLogs.map((log, idx) => (
+              <tr key={`${log.id || 'log'}-${idx}`} className="hover:bg-slate-50/70">
                 <td className="py-2.5 px-4 font-mono text-slate-500 whitespace-nowrap">
                   {new Date(log.timestamp).toLocaleString('vi-VN')}
                 </td>

@@ -26,10 +26,12 @@ import { GoogleSyncGuidanceBar } from './components/sync/GoogleSyncGuidanceBar';
 import { TemplateSettingsView } from './components/settings/TemplateSettingsView';
 
 function MainApp() {
-  const { isAuthenticated } = useApp();
+  const { isAuthenticated, currentUser, hasPermission } = useApp();
   const [activeTab, setActiveTab] = useState<string>('stock-receipts');
   const [reportBeneficiaryId, setReportBeneficiaryId] = useState<string | undefined>(undefined);
   const [dispensePrescriptionId, setDispensePrescriptionId] = useState<string | undefined>(undefined);
+
+  const canManageSync = currentUser?.role === 'ADMIN' && hasPermission('canManageSync');
 
   if (!isAuthenticated) {
     return <AuthView />;
@@ -58,8 +60,8 @@ function MainApp() {
         {/* Viewport Scrollable Area */}
         <main className="flex-1 overflow-y-auto p-6">
           <div className="max-w-7xl mx-auto">
-            {/* Top Auto-Backup & Sync Guidance Bar */}
-            <GoogleSyncGuidanceBar />
+            {/* Top Auto-Backup & Sync Guidance Bar (ADMIN ONLY) */}
+            {canManageSync && <GoogleSyncGuidanceBar />}
 
             {activeTab === 'dashboard' && <DashboardView onNavigate={(tab) => setActiveTab(tab)} />}
             {activeTab === 'medicines' && <MedicineListView />}
@@ -81,7 +83,18 @@ function MainApp() {
             )}
             {activeTab === 'template-settings' && <TemplateSettingsView />}
             {activeTab === 'general-reports' && <GeneralReportView />}
-            {activeTab === 'sync' && <SyncSheetsDriveView />}
+            {activeTab === 'sync' && (
+              canManageSync ? (
+                <SyncSheetsDriveView />
+              ) : (
+                <div className="bg-white border border-slate-200 rounded-xl p-8 text-center space-y-2">
+                  <h3 className="text-base font-bold text-slate-900">Quyền truy cập bị hạn chế</h3>
+                  <p className="text-xs text-slate-600 max-w-md mx-auto">
+                    Chỉ tài khoản Quản trị viên (Admin) mới có quyền xem giao diện và sử dụng tính năng sao lưu, đồng bộ Google Sheets & Google Drive.
+                  </p>
+                </div>
+              )
+            )}
             {activeTab === 'users' && <UserManagementView />}
             {activeTab === 'audit' && <AuditLogView />}
           </div>

@@ -25,6 +25,7 @@ import {
   RolePermissions,
   ROLE_PERMISSIONS,
   TemplateSettings,
+  DEFAULT_TEMPLATE_SETTINGS,
   BackupLog,
 } from '../types';
 import {
@@ -40,7 +41,17 @@ import {
 import {
   syncAllDataToGoogleSheets,
   GoogleSheetsSyncResult,
+  extractSpreadsheetId,
+  GOOGLE_SAMPLE_READONLY_ID,
 } from '../services/googleSheetsService';
+import {
+  syncAllDataViaAppsScript,
+  uploadDocumentViaAppsScript,
+  testAppsScriptConnection,
+  isValidAppsScriptUrl,
+  AppsScriptPingResult,
+} from '../services/appsScriptSyncService';
+import { uploadFileToGoogleDrive } from '../services/googleDriveService';
 import {
   INITIAL_USERS,
   INITIAL_BENEFICIARIES,
@@ -69,7 +80,7 @@ interface AppContextType {
   templateSettings: TemplateSettings;
   backupLogs: BackupLog[];
 
-  // Google Sheets Real-time Auto-Sync
+  // Google Sheets Real-time Auto-Sync (Admin Only)
   googleUser: any;
   isGoogleAuthenticated: boolean;
   isSyncingSheets: boolean;
@@ -78,6 +89,7 @@ interface AppContextType {
   loginWithGoogle: () => Promise<{ success: boolean; error?: string; cancelled?: boolean }>;
   logoutFromGoogle: () => Promise<void>;
   syncNowToGoogleSheets: (skipConfirm?: boolean) => Promise<GoogleSheetsSyncResult | null>;
+  testAppsScriptSync: (url: string) => Promise<AppsScriptPingResult>;
 
   // Template & Auto-backup Actions
   updateTemplateSettings: (settings: Partial<TemplateSettings>) => void;
@@ -106,6 +118,18 @@ interface AppContextType {
   rejectUser: (userId: string) => void;
   changeUserRole: (userId: string, role: UserRole) => void;
   toggleUserStatus: (userId: string, status: UserStatus) => void;
+  updateUserAccount: (
+    userId: string,
+    updates: {
+      fullName?: string;
+      email?: string;
+      phone?: string;
+      department?: string;
+      role?: UserRole;
+      status?: UserStatus;
+      password?: string;
+    }
+  ) => { success: boolean; error?: string };
 
   // Medicine Actions
   addMedicine: (medicine: Omit<Medicine, 'id' | 'createdAt'>) => Medicine;
@@ -157,12 +181,13 @@ interface AppContextType {
   getLowStockMedicines: () => { medicine: Medicine; currentStock: number }[];
   calculateBeneficiaryReport: (beneficiaryId: string, startDate: string, endDate: string) => BeneficiaryReportRow[];
 
-  // Sync & Storage
+  // Sync & Storage (Admin Only)
   syncDocumentToDrive: (
     docCode: string,
     docType: 'PHIEU_NHAP' | 'PHIEU_XUAT' | 'DON_THUOC' | 'BAO_CAO_BHYT',
-    fileName: string
-  ) => DriveSyncedFile;
+    fileName: string,
+    documentHtmlContent?: string
+  ) => Promise<DriveSyncedFile | null>;
   resetAllData: () => void;
 }
 
@@ -183,44 +208,6 @@ const STORAGE_KEYS = {
   IS_AUTHENTICATED: 'btxh_is_authenticated_v1',
   TEMPLATE_SETTINGS: 'btxh_template_settings_v1',
   BACKUP_LOGS: 'btxh_backup_logs_v1',
-};
-
-const DEFAULT_TEMPLATE_SETTINGS: TemplateSettings = {
-  parentOrg: 'SỞ LAO ĐỘNG - THƯƠNG BINH VÀ XÃ HỘI TP ĐÀ NẴNG',
-  agencyName: 'TRUNG TÂM BẢO TRỢ XÃ HỘI',
-  deptName: 'PHÒNG Y TẾ - PHCN',
-  qhnsCode: '1041008',
-  facilityAddress: 'Đà Nẵng',
-
-  receiptFormCode: 'Mẫu số: C20-HD',
-  receiptNotice: '(Ban hành theo Thông tư BTC)',
-  receiptTitle: 'PHIẾU NHẬP KHO',
-  receiptDefaultWarehouse: 'Kho Dược - Phòng Y tế & PHCN Trung tâm',
-
-  issueFormCode: 'Mẫu số: C21-HD',
-  issueNotice: '(Ban hành theo Thông tư BTC)',
-  issueTitle: 'PHIẾU XUẤT KHO',
-  issueDefaultWarehouse: 'Kho Dược - Phòng Y tế - PHCN Trung tâm',
-
-  reportTitle: 'BẢNG TỔNG HỢP NHẬP, XUẤT THUỐC MUA NGOÀI CHO ĐỐI TƯỢNG CÓ BẢO HIỂM Y TẾ',
-
-  preparerName: 'DS. Lê Thu Hà',
-  preparerTitle: 'Người lập biểu',
-  deptLeaderName: 'BS. CKI. Nguyễn Thanh Long',
-  deptLeaderTitle: 'Phụ trách Phòng Y tế - PHCN',
-  accountantName: 'Trần Đình Trọng',
-  accountantTitle: 'Kế toán trưởng',
-  warehouseKeeperName: 'Trần Văn Kho',
-  warehouseKeeperTitle: 'Thủ kho',
-  centerDirectorName: 'Lê Minh Tuấn',
-  centerDirectorTitle: 'Thủ trưởng đơn vị',
-
-  autoBackupEnabled: true,
-  googleSheetUrl: 'https://docs.google.com/spreadsheets/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms/edit',
-  googleDriveFolder: 'QUAN_LY_THUOC_TRUNG_TAM/2026',
-  autoSyncOnTransaction: true,
-  lastBackupTime: '10:00:00 26/10/2026',
-  lastBackupMessage: 'Đã sẵn sàng tự động sao lưu toàn diện lên Google Sheet và Drive',
 };
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -284,7 +271,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>(() => {
     const saved = localStorage.getItem(STORAGE_KEYS.AUDIT_LOGS);
-    if (saved) return JSON.parse(saved);
+    if (saved) {
+      try {
+        const parsed: AuditLog[] = JSON.parse(saved);
+        const seen = new Set<string>();
+        return parsed.map((item, idx) => {
+          let id = item.id;
+          if (!id || seen.has(id)) {
+            id = `${id || 'log'}-${idx}-${Math.random().toString(36).substring(2, 7)}`;
+          }
+          seen.add(id);
+          return { ...item, id };
+        });
+      } catch {
+        // fallback
+      }
+    }
     return [
       {
         id: 'log-1',
@@ -332,7 +334,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const saved = localStorage.getItem(STORAGE_KEYS.TEMPLATE_SETTINGS);
     if (saved) {
       try {
-        return { ...DEFAULT_TEMPLATE_SETTINGS, ...JSON.parse(saved) };
+        const parsed = JSON.parse(saved);
+        const merged: TemplateSettings = { ...DEFAULT_TEMPLATE_SETTINGS, ...parsed };
+        if (merged.googleSheetUrl && merged.googleSheetUrl.includes(GOOGLE_SAMPLE_READONLY_ID)) {
+          merged.googleSheetUrl = '';
+        }
+        if (merged.googleSpreadsheetId === GOOGLE_SAMPLE_READONLY_ID) {
+          merged.googleSpreadsheetId = '';
+        }
+        if (!merged.googleSpreadsheetId && merged.googleSheetUrl) {
+          merged.googleSpreadsheetId = extractSpreadsheetId(merged.googleSheetUrl);
+        }
+        return merged;
       } catch {
         // fallback
       }
@@ -344,7 +357,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const saved = localStorage.getItem(STORAGE_KEYS.BACKUP_LOGS);
     if (saved) {
       try {
-        return JSON.parse(saved);
+        const parsed: BackupLog[] = JSON.parse(saved);
+        const seen = new Set<string>();
+        return parsed.map((item, idx) => {
+          let id = item.id;
+          if (!id || seen.has(id)) {
+            id = `${id || 'bk'}-${idx}-${Math.random().toString(36).substring(2, 7)}`;
+          }
+          seen.add(id);
+          return { ...item, id };
+        });
       } catch {
         // fallback
       }
@@ -419,10 +441,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     localStorage.setItem(STORAGE_KEYS.BACKUP_LOGS, JSON.stringify(backupLogs));
   }, [backupLogs]);
 
-  // Template Settings Updates
   const updateTemplateSettings = (newSettings: Partial<TemplateSettings>) => {
     setTemplateSettings((prev) => {
       const updated = { ...prev, ...newSettings };
+      if (newSettings.googleSheetUrl !== undefined) {
+        const parsedId = extractSpreadsheetId(newSettings.googleSheetUrl);
+        updated.googleSpreadsheetId = parsedId === GOOGLE_SAMPLE_READONLY_ID ? '' : parsedId;
+      }
       addAuditLog('CẤU_HÌNH', 'BIỂU_MẪU', 'TEMPLATE', 'Cập nhật cấu hình biểu mẫu mặc định của Trung tâm');
       return updated;
     });
@@ -433,7 +458,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     addAuditLog('KHÔI_PHỤC', 'BIỂU_MẪU', 'TEMPLATE', 'Khôi phục cấu hình biểu mẫu mặc định ban đầu');
   };
 
-  // Google Sheets Auto-Sync States
+  // Google Sheets Auto-Sync States (Admin Only)
   const [googleUser, setGoogleUser] = useState<any>(null);
   const [isGoogleAuthenticated, setIsGoogleAuthenticated] = useState<boolean>(false);
   const [isSyncingSheets, setIsSyncingSheets] = useState<boolean>(false);
@@ -455,34 +480,90 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return () => unsubscribe();
   }, []);
 
-  const executeSheetsSync = async (
-    token: string,
-    reason: string
+  const executeHybridSheetsSync = async (
+    token: string | null,
+    reason: string,
+    settingsOverride?: TemplateSettings
   ): Promise<GoogleSheetsSyncResult | null> => {
+    if (currentUser?.role !== 'ADMIN') {
+      return null;
+    }
+
+    const activeSettings = settingsOverride || templateSettings;
+    const syncMode = activeSettings.syncMode || 'HYBRID';
+    const hasAppsScript = isValidAppsScriptUrl(activeSettings.appsScriptUrl);
+
     setIsSyncingSheets(true);
     setSyncSheetsError(null);
+
     try {
-      const result = await syncAllDataToGoogleSheets(
-        token,
-        beneficiaries,
-        receipts,
-        issues,
-        medicines,
-        transactions,
-        templateSettings
-      );
+      let result: GoogleSheetsSyncResult | null = null;
+      let usedChannel: 'APPS_SCRIPT' | 'OAUTH' = 'OAUTH';
+
+      // Channel 1: Try Google Apps Script Web App Bridge first when enabled
+      if (syncMode === 'APPS_SCRIPT' || (syncMode === 'HYBRID' && hasAppsScript)) {
+        if (!hasAppsScript) {
+          throw new Error(
+            'Chưa cấu hình URL Google Apps Script Web App hợp lệ. Vui lòng cài đặt Apps Script hoặc chuyển sang chế độ Kết hợp / Google OAuth.'
+          );
+        }
+
+        try {
+          const gasResult = await syncAllDataViaAppsScript(
+            activeSettings.appsScriptUrl,
+            beneficiaries,
+            receipts,
+            issues,
+            medicines,
+            transactions,
+            activeSettings
+          );
+          usedChannel = 'APPS_SCRIPT';
+          result = {
+            ...gasResult,
+            channel: 'APPS_SCRIPT',
+          };
+        } catch (gasErr: any) {
+          if (syncMode === 'APPS_SCRIPT' || !token) {
+            throw gasErr;
+          }
+          console.warn('Apps Script sync lỗi, tự động chuyển dự phòng sang Google OAuth:', gasErr);
+        }
+      }
+
+      // Channel 2: Direct Google OAuth API fallback or primary
+      if (!result) {
+        if (!token) {
+          throw new Error(
+            'Chưa có phiên Google OAuth (token hết hạn sau tải lại trang) và chưa gắn URL Google Apps Script. Hãy bấm "Kết nối Google Sheets" hoặc cài đặt Apps Script để tự động đồng bộ không gián đoạn.'
+          );
+        }
+        result = await syncAllDataToGoogleSheets(
+          token,
+          beneficiaries,
+          receipts,
+          issues,
+          medicines,
+          transactions,
+          activeSettings
+        );
+        usedChannel = 'OAUTH';
+      }
 
       setLastSheetsSyncResult(result);
+      const channelLabel = usedChannel === 'APPS_SCRIPT' ? 'Google Apps Script Bridge' : 'Google OAuth API';
+
       setTemplateSettings((prev) => ({
         ...prev,
-        googleSpreadsheetId: result.spreadsheetId,
-        googleSheetUrl: result.spreadsheetUrl,
-        lastBackupTime: result.timestamp,
-        lastBackupMessage: `${reason} (${result.rowCounts.receipts} PNK, ${result.rowCounts.issues} PXK, ${result.rowCounts.reports} báo cáo)`,
+        googleSpreadsheetId: result!.spreadsheetId || prev.googleSpreadsheetId,
+        googleSheetUrl: result!.spreadsheetUrl || prev.googleSheetUrl,
+        lastSyncChannel: channelLabel,
+        lastBackupTime: result!.timestamp,
+        lastBackupMessage: `${reason} (${result!.rowCounts.receipts} PNK, ${result!.rowCounts.issues} PXK, ${result!.rowCounts.reports} báo cáo) · ${channelLabel}`,
       }));
 
       const newLog: BackupLog = {
-        id: `bk-${Date.now()}`,
+        id: `bk-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
         timestamp: result.timestamp,
         action: reason,
         status: 'SUCCESS',
@@ -492,7 +573,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           medicines: medicines.length,
           beneficiaries: beneficiaries.length,
         },
-        details: `Đã tự động đồng bộ lên Google Sheets thành công: ${result.spreadsheetUrl}`,
+        details: `Đồng bộ thành công qua ${channelLabel}: ${result.spreadsheetUrl}`,
       };
       setBackupLogs((prev) => [newLog, ...prev.slice(0, 49)]);
 
@@ -502,7 +583,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const errMsg = err.message || 'Đồng bộ Google Sheets thất bại';
       setSyncSheetsError(errMsg);
       const newLog: BackupLog = {
-        id: `bk-${Date.now()}`,
+        id: `bk-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
         timestamp:
           new Date().toLocaleTimeString('vi-VN') + ' ' + new Date().toLocaleDateString('vi-VN'),
         action: reason,
@@ -522,7 +603,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
+  const testAppsScriptSync = async (url: string): Promise<AppsScriptPingResult> => {
+    if (currentUser?.role !== 'ADMIN') {
+      return { success: false, error: 'Chỉ Quản trị viên (ADMIN) mới có quyền kiểm tra kết nối.' };
+    }
+    const res = await testAppsScriptConnection(url);
+    if (res.success && res.spreadsheetId) {
+      setTemplateSettings((prev) => ({
+        ...prev,
+        appsScriptUrl: url.trim(),
+        googleSpreadsheetId: res.spreadsheetId || prev.googleSpreadsheetId,
+        googleSheetUrl: res.spreadsheetUrl || prev.googleSheetUrl,
+      }));
+    }
+    return res;
+  };
+
   const loginWithGoogle = async (): Promise<{ success: boolean; error?: string; cancelled?: boolean }> => {
+    if (currentUser?.role !== 'ADMIN') {
+      return { success: false, error: 'Chỉ Quản trị viên (ADMIN) mới được kết nối đồng bộ Google Sheets.' };
+    }
     try {
       setSyncSheetsError(null);
       const res = await signInWithGoogle();
@@ -531,7 +631,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           setSyncSheetsError(res.error);
           return { success: false, error: res.error, cancelled: true };
         }
-        // User closed the popup, do not show error banner
         return { success: false, cancelled: true };
       }
       if (!res.user || !res.accessToken) {
@@ -543,8 +642,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         ...prev,
         googleUserEmail: res.user?.email || prev.googleUserEmail,
       }));
-      // Auto-trigger sync on login
-      await executeSheetsSync(res.accessToken, 'Đồng bộ khởi tạo sau khi kết nối Google');
+      await executeHybridSheetsSync(res.accessToken, 'Đồng bộ khởi tạo sau khi kết nối Google');
       return { success: true };
     } catch (err: any) {
       if (err?.code === 'auth/popup-closed-by-user' || err?.code === 'auth/cancelled-popup-request') {
@@ -563,46 +661,60 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const syncNowToGoogleSheets = async (): Promise<GoogleSheetsSyncResult | null> => {
+    if (currentUser?.role !== 'ADMIN') {
+      setSyncSheetsError('Chỉ tài khoản Quản trị viên (ADMIN) mới có quyền đồng bộ Google Sheets.');
+      return null;
+    }
+
+    const hasAppsScript = isValidAppsScriptUrl(templateSettings.appsScriptUrl);
+    if (hasAppsScript && (templateSettings.syncMode === 'APPS_SCRIPT' || templateSettings.syncMode === 'HYBRID')) {
+      const token = await getAccessToken();
+      return executeHybridSheetsSync(token, 'Đồng bộ toàn bộ dữ liệu lên Google Sheets');
+    }
+
     const token = await getAccessToken();
     if (!token) {
       const res = await loginWithGoogle();
       if (!res.success) return null;
       const newToken = await getAccessToken();
       if (!newToken) return null;
-      return executeSheetsSync(newToken, 'Đồng bộ toàn bộ dữ liệu lên Google Sheets');
+      return executeHybridSheetsSync(newToken, 'Đồng bộ toàn bộ dữ liệu lên Google Sheets');
     }
-    return executeSheetsSync(token, 'Đồng bộ toàn bộ dữ liệu lên Google Sheets');
+    return executeHybridSheetsSync(token, 'Đồng bộ toàn bộ dữ liệu lên Google Sheets');
   };
 
-  // Trigger Automatic Backup to Google Sheet & Drive
+  // Trigger Automatic Backup to Google Sheet & Drive (Cloud sync runs only for ADMIN)
   const triggerAutoBackup = (actionDescription: string) => {
     const timestamp = new Date().toLocaleTimeString('vi-VN') + ' ' + new Date().toLocaleDateString('vi-VN');
-    const newLog: BackupLog = {
-      id: `bk-${Date.now()}`,
-      timestamp,
-      action: actionDescription,
-      status: 'SUCCESS',
-      recordCounts: {
-        receipts: receipts.length,
-        issues: issues.length,
-        medicines: medicines.length,
-        beneficiaries: beneficiaries.length,
-      },
-      details: `Đã tự động sao lưu dữ liệu cập nhật sau khi ${actionDescription} vào Google Sheet & Google Drive.`,
-    };
+    const isAdmin = currentUser?.role === 'ADMIN';
 
-    setBackupLogs((prev) => [newLog, ...prev.slice(0, 49)]);
-    setTemplateSettings((prev) => ({
-      ...prev,
-      lastBackupTime: timestamp,
-      lastBackupMessage: `Đã tự động sao lưu: ${actionDescription}`,
-    }));
+    if (!isAdmin) {
+      return;
+    }
 
-    // Auto-sync directly to Google Sheets if token is present and auto-sync is enabled
+    const hasAppsScript = isValidAppsScriptUrl(templateSettings.appsScriptUrl);
+
     if (templateSettings.autoBackupEnabled) {
       getAccessToken().then((token) => {
-        if (token) {
-          executeSheetsSync(token, `Tự động cập nhật sau khi ${actionDescription}`).catch(console.error);
+        if (hasAppsScript || token) {
+          executeHybridSheetsSync(token, `Tự động cập nhật sau khi ${actionDescription}`).catch((err) => {
+            console.warn('Lỗi tự động sao lưu ngầm:', err);
+          });
+        } else {
+          const newLog: BackupLog = {
+            id: `bk-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+            timestamp,
+            action: actionDescription,
+            status: 'PENDING',
+            recordCounts: {
+              receipts: receipts.length,
+              issues: issues.length,
+              medicines: medicines.length,
+              beneficiaries: beneficiaries.length,
+            },
+            details: `Đã ghi nhận biến động (${actionDescription}). Cần gắn Apps Script URL hoặc kết nối Google OAuth để đẩy lên đám mây.`,
+          };
+          setBackupLogs((prev) => [newLog, ...prev.slice(0, 49)]);
         }
       });
     }
@@ -635,7 +747,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const addAuditLog = (action: string, entity: string, entityId: string, details: string) => {
     const newLog: AuditLog = {
-      id: `log-${Date.now()}`,
+      id: `log-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
       timestamp: new Date().toISOString(),
       userId: currentUser.id,
       userName: currentUser.fullName,
@@ -951,6 +1063,76 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return u;
       })
     );
+  };
+
+  const updateUserAccount = (
+    userId: string,
+    updates: {
+      fullName?: string;
+      email?: string;
+      phone?: string;
+      department?: string;
+      role?: UserRole;
+      status?: UserStatus;
+      password?: string;
+    }
+  ): { success: boolean; error?: string } => {
+    if (currentUser?.role !== 'ADMIN') {
+      return { success: false, error: 'Chỉ Quản trị viên (ADMIN) mới có quyền chỉnh sửa tài khoản cán bộ.' };
+    }
+
+    const target = users.find((u) => u.id === userId);
+    if (!target) {
+      return { success: false, error: 'Không tìm thấy tài khoản cán bộ.' };
+    }
+
+    const nextEmail = updates.email !== undefined ? updates.email.trim() : target.email;
+    if (!nextEmail || !nextEmail.includes('@')) {
+      return { success: false, error: 'Địa chỉ Email không hợp lệ.' };
+    }
+
+    const duplicate = users.find(
+      (u) => u.id !== userId && u.email.toLowerCase() === nextEmail.toLowerCase()
+    );
+    if (duplicate) {
+      return { success: false, error: 'Địa chỉ Email này đã được sử dụng bởi tài khoản khác.' };
+    }
+
+    const nextFullName = updates.fullName !== undefined ? updates.fullName.trim() : target.fullName;
+    if (!nextFullName) {
+      return { success: false, error: 'Họ và tên cán bộ không được để trống.' };
+    }
+
+    const updatedUser: User = {
+      ...target,
+      fullName: nextFullName,
+      email: nextEmail,
+      phone: updates.phone !== undefined ? updates.phone.trim() : target.phone,
+      department: updates.department !== undefined ? updates.department.trim() : target.department,
+      role: updates.role ?? target.role,
+      status: updates.status ?? target.status,
+      password: updates.password && updates.password.trim().length > 0 ? updates.password.trim() : target.password,
+      approvedAt:
+        updates.status === 'ACTIVE' && !target.approvedAt ? getTodayISODate() : target.approvedAt,
+      approvedBy:
+        updates.status === 'ACTIVE' && !target.approvedBy ? currentUser.fullName : target.approvedBy,
+    };
+
+    setUsers((prev) => prev.map((u) => (u.id === userId ? updatedUser : u)));
+
+    if (currentUser.id === userId) {
+      setCurrentUser(updatedUser);
+    }
+
+    const resetNote = updates.password && updates.password.trim().length > 0 ? ' (bao gồm đặt lại mật khẩu)' : '';
+    addAuditLog(
+      'CẬP_NHẬT_TÀI_KHOẢN',
+      'NGƯỜI_DÙNG',
+      updatedUser.id,
+      `Quản trị viên cập nhật toàn bộ thông tin cán bộ ${updatedUser.fullName} (${updatedUser.email}, vai trò ${updatedUser.role}, trạng thái ${updatedUser.status})${resetNote}`
+    );
+
+    return { success: true };
   };
 
   // Stock Receipt Management
@@ -1595,33 +1777,87 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return rows;
   };
 
-  const syncDocumentToDrive = (
+  const syncDocumentToDrive = async (
     docCode: string,
     docType: 'PHIEU_NHAP' | 'PHIEU_XUAT' | 'DON_THUOC' | 'BAO_CAO_BHYT',
-    fileName: string
-  ): DriveSyncedFile => {
+    fileName: string,
+    documentHtmlContent?: string
+  ): Promise<DriveSyncedFile | null> => {
+    if (currentUser?.role !== 'ADMIN') {
+      setSyncSheetsError('Chỉ Quản trị viên (ADMIN) mới có quyền lưu trữ tài liệu lên Google Drive.');
+      return null;
+    }
+
     const year = new Date().getFullYear();
-    const folderMapping = {
-      PHIEU_NHAP: `QUAN_LY_THUOC_TRUNG_TAM/${year}/PHIEU_NHAP`,
-      PHIEU_XUAT: `QUAN_LY_THUOC_TRUNG_TAM/${year}/PHIEU_XUAT`,
-      DON_THUOC: `QUAN_LY_THUOC_TRUNG_TAM/${year}/DON_THUOC`,
-      BAO_CAO_BHYT: `QUAN_LY_THUOC_TRUNG_TAM/${year}/BAO_CAO`,
+    const baseFolder = (templateSettings.googleDriveFolder || `QUAN_LY_THUOC_TRUNG_TAM/${year}`).replace(/\/+$/, '');
+    const subFolderMap = {
+      PHIEU_NHAP: 'PHIEU_NHAP',
+      PHIEU_XUAT: 'PHIEU_XUAT',
+      DON_THUOC: 'DON_THUOC',
+      BAO_CAO_BHYT: 'BAO_CAO',
     };
+    const driveFolder = `${baseFolder}/${subFolderMap[docType]}`;
+    const safeFileName = fileName.endsWith('.html') || fileName.endsWith('.json') ? fileName : fileName.replace(/\.pdf$/i, '.html');
+    const htmlPayload =
+      documentHtmlContent ||
+      `<!doctype html><html lang="vi"><head><meta charset="utf-8"><title>${docCode}</title></head><body><h2>${templateSettings.agencyName}</h2><p>Chứng từ: <strong>${docCode}</strong> (${docType})</p><p>Lưu trữ lúc: ${new Date().toLocaleString('vi-VN')}</p></body></html>`;
+
+    let uploadedFileId = `drv-${Math.random().toString(36).substring(2, 10)}`;
+    let webViewLink: string | undefined = undefined;
+    let uploadChannel: 'APPS_SCRIPT' | 'OAUTH_DRIVE_V3' | 'LOCAL_RECORD' = 'LOCAL_RECORD';
+
+    const hasAppsScript = isValidAppsScriptUrl(templateSettings.appsScriptUrl);
+    if (hasAppsScript && (templateSettings.syncMode === 'APPS_SCRIPT' || templateSettings.syncMode === 'HYBRID')) {
+      const gasUpload = await uploadDocumentViaAppsScript(
+        templateSettings.appsScriptUrl,
+        driveFolder,
+        safeFileName,
+        htmlPayload,
+        'text/html'
+      );
+      if (gasUpload.success && gasUpload.fileId) {
+        uploadedFileId = gasUpload.fileId;
+        webViewLink = gasUpload.webViewLink;
+        uploadChannel = 'APPS_SCRIPT';
+      }
+    }
+
+    if (uploadChannel === 'LOCAL_RECORD') {
+      const token = await getAccessToken();
+      if (token) {
+        const driveRes = await uploadFileToGoogleDrive(token, driveFolder, safeFileName, htmlPayload, 'text/html');
+        if (driveRes.success && driveRes.fileId) {
+          uploadedFileId = driveRes.fileId;
+          webViewLink = driveRes.webViewLink;
+          uploadChannel = 'OAUTH_DRIVE_V3';
+        }
+      }
+    }
+
+    const byteSize = new Blob([htmlPayload]).size;
+    const sizeLabel = byteSize > 1024 ? `${Math.max(1, Math.round(byteSize / 1024))} KB` : `${byteSize} B`;
 
     const newSyncFile: DriveSyncedFile = {
-      id: `sync-${Date.now()}`,
-      fileId: `drv-${Math.random().toString(36).substring(2, 10)}`,
+      id: `sync-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      fileId: uploadedFileId,
       docCode,
       docType,
-      fileName,
-      driveFolder: folderMapping[docType],
+      fileName: safeFileName,
+      driveFolder,
+      webViewLink,
+      uploadChannel,
       createdAt: new Date().toISOString(),
-      fileSize: `${Math.floor(120 + Math.random() * 80)} KB`,
-      syncedToSheets: true,
+      fileSize: sizeLabel,
+      syncedToSheets: uploadChannel !== 'LOCAL_RECORD',
     };
 
     setSyncedFiles((prev) => [newSyncFile, ...prev]);
-    addAuditLog('LƯU_TRỮ_DRIVE', 'TÀI_LIỆU_PDF', docCode, `Đã xuất và lưu PDF ${fileName} lên thư mục ${newSyncFile.driveFolder}`);
+    addAuditLog(
+      'LƯU_TRỮ_DRIVE',
+      'TÀI_LIỆU',
+      docCode,
+      `Đã lưu chứng từ ${safeFileName} vào ${driveFolder} (${uploadChannel === 'APPS_SCRIPT' ? 'Google Apps Script Drive' : uploadChannel === 'OAUTH_DRIVE_V3' ? 'Google Drive API v3' : 'Hàng đợi cục bộ'})`
+    );
 
     return newSyncFile;
   };
@@ -1665,6 +1901,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         loginWithGoogle,
         logoutFromGoogle,
         syncNowToGoogleSheets,
+        testAppsScriptSync,
         updateTemplateSettings,
         resetTemplateSettings,
         triggerAutoBackup,
@@ -1678,6 +1915,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         hasPermission,
         changeUserRole,
         toggleUserStatus,
+        updateUserAccount,
         registerUser,
         approveUser,
         rejectUser,

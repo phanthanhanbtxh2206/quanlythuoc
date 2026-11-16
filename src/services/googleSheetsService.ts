@@ -3,8 +3,23 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Beneficiary, StockReceipt, StockIssue, Medicine, StockTransaction, TemplateSettings, User } from '../types';
-import { buildFourSheetsData } from '../utils/googleSheetsBackup';
+import {
+  Beneficiary,
+  StockReceipt,
+  StockIssue,
+  Medicine,
+  Prescription,
+  StockTransaction,
+  AuditLog,
+  DriveSyncedFile,
+  TemplateSettings,
+  User,
+} from '../types';
+import {
+  buildAllTenSheets2D,
+  SIX_SYSTEM_SHEET_NAMES,
+  TEN_SHEET_NAMES,
+} from '../utils/googleSheetsBackup';
 
 export interface GoogleSheetsSyncResult {
   success: boolean;
@@ -12,6 +27,7 @@ export interface GoogleSheetsSyncResult {
   spreadsheetUrl: string;
   timestamp: string;
   channel?: 'APPS_SCRIPT' | 'OAUTH';
+  scriptVersion?: number;
   driveStateFileId?: string;
   driveStateWebViewLink?: string;
   rowCounts: {
@@ -41,24 +57,9 @@ export const extractSpreadsheetId = (urlOrId?: string): string => {
   return '';
 };
 
-/**
- * Convert JSON array of objects to 2D array for Google Sheets API
- */
-const jsonTo2DArray = (rows: Record<string, any>[]): any[][] => {
-  if (!rows || rows.length === 0) return [];
-  const headers = Object.keys(rows[0]);
-  const values = rows.map((r) =>
-    headers.map((h) => {
-      const v = r[h];
-      return v !== undefined && v !== null ? v : '';
-    })
-  );
-  return [headers, ...values];
-};
-
 const translateSheetsApiError = (status: number, rawBody: string, context: string): string => {
   if (status === 401) {
-    return `Phiên đăng nhập Google OAuth đã hết hạn hoặc bị thu hồi (401). Vui lòng bấm "Kết nối lại Google" hoặc chuyển sang dùng Google Apps Script để đồng bộ không giới hạn thời gian.`;
+    return `Phiên đăng nhập Google OAuth đã hết hạn hoặc bị thu hồi (401). Vui lòng bấm "Kết nối lại Google" hoặc dùng Google Apps Script v3 để đồng bộ liên tục mọi thiết bị.`;
   }
   if (status === 403) {
     return `Không có quyền ghi vào bảng tính này (403 - Giới hạn phạm vi drive.file). Với chế độ Google OAuth, ứng dụng chỉ ghi được bảng tính do chính ứng dụng tạo mới hoặc bảng tính đã gắn Google Apps Script Bridge. Hãy xóa link cũ để tạo bảng tính mới hoặc cài Apps Script URL.`;
@@ -70,8 +71,7 @@ const translateSheetsApiError = (status: number, rawBody: string, context: strin
 };
 
 /**
- * Ensure the Google Spreadsheet exists and contains the 3 sheets:
- * "Phiếu nhập", "Phiếu xuất", "Báo cáo"
+ * Ensure the Google Spreadsheet exists and contains all 10 tabs.
  */
 export const ensurePharmacySpreadsheet = async (
   accessToken: string,
@@ -79,11 +79,10 @@ export const ensurePharmacySpreadsheet = async (
   title?: string
 ): Promise<{ id: string; url: string; createdNew: boolean }> => {
   const defaultTitle =
-    title || 'Sổ Quản Lý Dược Phẩm & Cấp Phát Thuốc - TTBTXH (Tự Động Sao Lưu)';
+    title || 'Sổ Quản Lý Dược Phẩm & Cấp Phát Thuốc - TTBTXH Đà Nẵng (10 Tab)';
 
   const candidateId = extractSpreadsheetId(existingSpreadsheetId);
 
-  // 1. If an ID is provided (and not Google's public sample sheet), test accessibility
   if (candidateId && candidateId !== GOOGLE_SAMPLE_READONLY_ID) {
     const checkRes = await fetch(
       `https://sheets.googleapis.com/v4/spreadsheets/${candidateId}?fields=spreadsheetId,properties.title,sheets.properties`,
@@ -100,9 +99,7 @@ export const ensurePharmacySpreadsheet = async (
         (s: any) => s.properties?.title
       );
 
-      // Ensure all 4 required sheets exist
-      const requiredSheets = ['Phiếu nhập', 'Phiếu xuất', 'Báo cáo', 'Tài khoản'];
-      const missingSheets = requiredSheets.filter((s) => !existingSheetTitles.includes(s));
+      const missingSheets = TEN_SHEET_NAMES.filter((s) => !existingSheetTitles.includes(s));
 
       if (missingSheets.length > 0) {
         const addRequests = missingSheets.map((sheetTitle) => ({
@@ -149,42 +146,21 @@ export const ensurePharmacySpreadsheet = async (
     }
 
     if (checkRes.status === 403) {
-      // Bảng tính do người dùng tạo thủ công bên ngoài không nằm trong phạm vi drive.file -> giải thích rõ và tạo bảng tính mới thuộc ứng dụng
       console.warn('Spreadsheet bên ngoài trả về 403 với scope drive.file, đang tạo bảng tính thuộc quyền ứng dụng...');
     }
   }
 
-  // 2. Create a new Google Spreadsheet with 3 sheets configured
+  // Create a new Google Spreadsheet with all 10 tabs configured
   const createPayload = {
     properties: {
       title: defaultTitle,
     },
-    sheets: [
-      {
-        properties: {
-          title: 'Phiếu nhập',
-          gridProperties: { frozenRowCount: 1 },
-        },
+    sheets: TEN_SHEET_NAMES.map((sheetTitle) => ({
+      properties: {
+        title: sheetTitle,
+        gridProperties: { frozenRowCount: 1 },
       },
-      {
-        properties: {
-          title: 'Phiếu xuất',
-          gridProperties: { frozenRowCount: 1 },
-        },
-      },
-      {
-        properties: {
-          title: 'Báo cáo',
-          gridProperties: { frozenRowCount: 1 },
-        },
-      },
-      {
-        properties: {
-          title: 'Tài khoản',
-          gridProperties: { frozenRowCount: 1 },
-        },
-      },
-    ],
+    })),
   };
 
   const createRes = await fetch('https://sheets.googleapis.com/v4/spreadsheets', {
@@ -214,87 +190,76 @@ export const ensurePharmacySpreadsheet = async (
 };
 
 /**
- * Automatically synchronize all pharmacy data + accounts across 4 sheets via OAuth token.
+ * Prefix leading-zero numeric-looking strings (e.g., phone 0905123456) with "'" for USER_ENTERED Sheets API
+ */
+const sanitizeOAuthValues = (tabName: string, values: any[][]): any[][] => {
+  if (tabName !== 'Tài khoản' && tabName !== 'DoiTuong') return values;
+  return values.map((row, rowIdx) => {
+    if (rowIdx === 0) return row;
+    return row.map((cell, colIdx) => {
+      if (tabName === 'Tài khoản' && (colIdx === 4 || colIdx === 5)) {
+        const s = String(cell ?? '');
+        if (s && !s.startsWith("'")) return `'${s}`;
+      }
+      if (tabName === 'DoiTuong' && (colIdx === 5 || colIdx === 6)) {
+        const s = String(cell ?? '');
+        if (s && !s.startsWith("'")) return `'${s}`;
+      }
+      return cell;
+    });
+  });
+};
+
+/**
+ * Synchronize all 10 tabs in the single Google Spreadsheet via OAuth token.
  */
 export const syncAllDataToGoogleSheets = async (
   accessToken: string,
-  beneficiaries: Beneficiary[],
-  receipts: StockReceipt[],
-  issues: StockIssue[],
-  medicines: Medicine[],
-  transactions: StockTransaction[],
-  templateSettings: TemplateSettings,
-  users: User[] = []
+  params: {
+    beneficiaries: Beneficiary[];
+    receipts: StockReceipt[];
+    issues: StockIssue[];
+    medicines: Medicine[];
+    prescriptions: Prescription[];
+    transactions: StockTransaction[];
+    auditLogs: AuditLog[];
+    syncedFiles?: DriveSyncedFile[];
+    templateSettings: TemplateSettings;
+    users: User[];
+  }
 ): Promise<GoogleSheetsSyncResult> => {
-  // 1. Generate structured 4-sheet rows
-  const { receiptSheetRows, issueSheetRows, reportSheetRows, accountSheetRows } = buildFourSheetsData(
-    beneficiaries,
-    receipts,
-    issues,
-    medicines,
-    transactions,
-    users
-  );
+  const sheetsMap = buildAllTenSheets2D(params);
 
-  const receiptValues = jsonTo2DArray(receiptSheetRows);
-  const issueValues = jsonTo2DArray(issueSheetRows);
-  const reportValues = jsonTo2DArray(reportSheetRows);
-  const accountValues = jsonTo2DArray(accountSheetRows);
-
-  // 2. Resolve target spreadsheet ID from either googleSpreadsheetId or pasted googleSheetUrl
   const resolvedExistingId =
-    extractSpreadsheetId(templateSettings.googleSpreadsheetId) ||
-    extractSpreadsheetId(templateSettings.googleSheetUrl);
+    extractSpreadsheetId(params.templateSettings.googleSpreadsheetId) ||
+    extractSpreadsheetId(params.templateSettings.googleSheetUrl);
 
-  const title = `Sổ Quản Lý Dược Phẩm & Cấp Phát Thuốc - ${templateSettings.agencyName || 'TTBTXH'}`;
+  const title = `Sổ Quản Lý Dược Phẩm & Cấp Phát Thuốc - ${params.templateSettings.agencyName || 'TTBTXH Đà Nẵng'}`;
   const spreadsheet = await ensurePharmacySpreadsheet(accessToken, resolvedExistingId, title);
   const spreadsheetId = spreadsheet.id;
 
-  // 3. Clear existing values to prevent stale trailing cells
-  const sheetsToClear = ["'Phiếu nhập'", "'Phiếu xuất'", "'Báo cáo'", "'Tài khoản'"];
-  await Promise.all(
-    sheetsToClear.map((sName) =>
-      fetch(
-        `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(
-          sName + '!A1:ZZ1000'
-        )}:clear`,
-        {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-            'Content-Type': 'application/json',
-          },
-        }
-      ).catch(() => null)
-    )
-  );
+  // Clear existing ranges in one batchClear call
+  await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values:batchClear`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ranges: TEN_SHEET_NAMES.map((name) => `'${name}'!A1:ZZ2000`),
+      }),
+    }
+  ).catch(() => null);
 
-  // 4. Batch update values for all 4 sheets simultaneously
-  const updatePayload = {
-    valueInputOption: 'USER_ENTERED',
-    data: [
-      {
-        range: "'Phiếu nhập'!A1",
-        values: receiptValues,
-      },
-      {
-        range: "'Phiếu xuất'!A1",
-        values: issueValues,
-      },
-      {
-        range: "'Báo cáo'!A1",
-        values: reportValues,
-      },
-      ...(accountValues.length > 0
-        ? [
-            {
-              range: "'Tài khoản'!A1",
-              values: accountValues,
-            },
-          ]
-        : []),
-    ],
-  };
+  const updateData = TEN_SHEET_NAMES.filter((name) => {
+    const vals = sheetsMap[name];
+    return Array.isArray(vals) && vals.length > 0;
+  }).map((name) => ({
+    range: `'${name}'!A1`,
+    values: sanitizeOAuthValues(name, sheetsMap[name]),
+  }));
 
   const updateRes = await fetch(
     `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values:batchUpdate`,
@@ -304,14 +269,17 @@ export const syncAllDataToGoogleSheets = async (
         Authorization: `Bearer ${accessToken}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify(updatePayload),
+      body: JSON.stringify({
+        valueInputOption: 'USER_ENTERED',
+        data: updateData,
+      }),
     }
   );
 
   if (!updateRes.ok) {
     const errText = await updateRes.text();
     throw new Error(
-      translateSheetsApiError(updateRes.status, errText, 'Lỗi cập nhật dữ liệu Google Sheets')
+      translateSheetsApiError(updateRes.status, errText, 'Lỗi cập nhật dữ liệu 10 tab Google Sheets')
     );
   }
 
@@ -325,11 +293,65 @@ export const syncAllDataToGoogleSheets = async (
     timestamp,
     channel: 'OAUTH',
     rowCounts: {
-      receipts: Math.max(0, receiptValues.length - 1),
-      issues: Math.max(0, issueValues.length - 1),
-      reports: Math.max(0, reportValues.length - 1),
-      accounts: Math.max(0, accountValues.length - 1),
+      receipts: Math.max(0, (sheetsMap['Phiếu nhập']?.length || 1) - 1),
+      issues: Math.max(0, (sheetsMap['Phiếu xuất']?.length || 1) - 1),
+      reports: Math.max(0, (sheetsMap['Báo cáo']?.length || 1) - 1),
+      accounts: Math.max(0, (sheetsMap['Tài khoản']?.length || 1) - 1),
     },
+  };
+};
+
+/**
+ * Read back rows from tab "Tài khoản" + 6 system tabs via Google Sheets API v4 (batchGet)
+ */
+export const readAllSheetsViaOAuth = async (
+  accessToken: string,
+  spreadsheetId: string
+): Promise<{
+  accountRows: any[][];
+  tables: Record<string, any[][]>;
+  isSheetInitialized: boolean;
+}> => {
+  const cleanId = extractSpreadsheetId(spreadsheetId);
+  if (!cleanId) {
+    return { accountRows: [], tables: {}, isSheetInitialized: false };
+  }
+
+  const tabsToRead = ['Tài khoản', ...SIX_SYSTEM_SHEET_NAMES];
+  const rangesQuery = tabsToRead
+    .map((t) => `ranges=${encodeURIComponent(`'${t}'!A1:Z2000`)}`)
+    .join('&');
+
+  const res = await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${cleanId}/values:batchGet?${rangesQuery}`,
+    {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    }
+  );
+
+  if (!res.ok) {
+    return { accountRows: [], tables: {}, isSheetInitialized: false };
+  }
+
+  const data = await res.json();
+  const valueRanges: any[] = Array.isArray(data.valueRanges) ? data.valueRanges : [];
+  const tables: Record<string, any[][]> = {};
+  let isSheetInitialized = false;
+
+  tabsToRead.forEach((tabName, idx) => {
+    const vals = Array.isArray(valueRanges[idx]?.values) ? valueRanges[idx].values : [];
+    tables[tabName] = vals;
+    if (vals.length >= 2) {
+      isSheetInitialized = true;
+    }
+  });
+
+  return {
+    accountRows: tables['Tài khoản'] || [],
+    tables,
+    isSheetInitialized,
   };
 };
 

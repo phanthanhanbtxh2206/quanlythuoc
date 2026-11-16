@@ -4,7 +4,37 @@
  */
 
 import * as XLSX from 'xlsx';
-import { Beneficiary, StockReceipt, StockIssue, Medicine, StockTransaction, TemplateSettings, User, UserRole, UserStatus } from '../types';
+import {
+  Beneficiary,
+  StockReceipt,
+  StockReceiptItem,
+  StockIssue,
+  StockIssueItem,
+  Medicine,
+  MedicineSourceType,
+  StockTransaction,
+  Prescription,
+  AuditLog,
+  DriveSyncedFile,
+  TemplateSettings,
+  DEFAULT_TEMPLATE_SETTINGS,
+  User,
+  UserRole,
+  UserStatus,
+} from '../types';
+
+export const FOUR_MAIN_SHEET_NAMES = ['Phiếu nhập', 'Phiếu xuất', 'Báo cáo', 'Tài khoản'] as const;
+
+export const SIX_SYSTEM_SHEET_NAMES = [
+  'DanhMuc_Thuoc',
+  'DoiTuong',
+  'ChiTiet_PhieuNhap',
+  'ChiTiet_PhieuXuat',
+  'DonThuoc_GiaoDich',
+  'CauHinh_BieuMau',
+] as const;
+
+export const TEN_SHEET_NAMES = [...FOUR_MAIN_SHEET_NAMES, ...SIX_SYSTEM_SHEET_NAMES] as const;
 
 export interface FourSheetsData {
   receiptSheetRows: any[];
@@ -12,6 +42,20 @@ export interface FourSheetsData {
   reportSheetRows: any[];
   accountSheetRows: any[];
 }
+
+export interface AllTenSheetsData extends FourSheetsData {
+  medicinesSheetRows: any[];
+  beneficiariesSheetRows: any[];
+  receiptDetailsSheetRows: any[];
+  issueDetailsSheetRows: any[];
+  prescriptionsTransactionsSheetRows: any[];
+  templateSettingsSheetRows: any[];
+}
+
+export const stripLeadingQuote = (val: any): string => {
+  const s = val !== undefined && val !== null ? String(val).trim() : '';
+  return s.startsWith("'") ? s.slice(1).trim() : s;
+};
 
 export const buildUsersAccountSheetRows = (users: User[]) => {
   return (users || []).map((u, idx) => ({
@@ -79,37 +123,38 @@ export const parseUsersFromAccountSheet = (rows2D: any[][], fallbackUsers: User[
     const row = rows2D[i];
     if (!Array.isArray(row)) continue;
 
-    const email = colEmail >= 0 ? String(row[colEmail] || '').trim() : '';
-    const fullName = colName >= 0 ? String(row[colName] || '').trim() : '';
+    const email = colEmail >= 0 ? stripLeadingQuote(row[colEmail]) : '';
+    const fullName = colName >= 0 ? stripLeadingQuote(row[colName]) : '';
     if (!email && !fullName) continue;
 
-    const id = (colId >= 0 ? String(row[colId] || '').trim() : '') || `usr-sheet-${i}`;
+    const id = (colId >= 0 ? stripLeadingQuote(row[colId]) : '') || `usr-sheet-${i}`;
     const existing = fallbackUsers.find(
       (u) => u.id === id || (email && u.email.toLowerCase() === email.toLowerCase())
     );
 
-    const passwordVal = colPassword >= 0 ? String(row[colPassword] || '').trim() : '';
+    const passwordVal = colPassword >= 0 ? stripLeadingQuote(row[colPassword]) : '';
 
     parsed.push({
       id,
       fullName: fullName || existing?.fullName || email,
       email: email || existing?.email || '',
       password: passwordVal || existing?.password || '123',
-      phone: colPhone >= 0 ? String(row[colPhone] || '').trim() : existing?.phone || '',
+      phone: colPhone >= 0 ? stripLeadingQuote(row[colPhone]) : existing?.phone || '',
       department:
-        (colDept >= 0 ? String(row[colDept] || '').trim() : '') ||
+        (colDept >= 0 ? stripLeadingQuote(row[colDept]) : '') ||
         existing?.department ||
         'Phòng Y tế - Phục hồi chức năng',
       role: colRole >= 0 ? normalizeRole(String(row[colRole] || '')) : existing?.role || 'DOCTOR',
       status: colStatus >= 0 ? normalizeStatus(String(row[colStatus] || '')) : existing?.status || 'PENDING_APPROVAL',
-      createdAt: (colCreated >= 0 ? String(row[colCreated] || '').trim() : '') || existing?.createdAt || '',
-      approvedAt: colApprovedAt >= 0 ? String(row[colApprovedAt] || '').trim() || undefined : existing?.approvedAt,
-      approvedBy: colApprovedBy >= 0 ? String(row[colApprovedBy] || '').trim() || undefined : existing?.approvedBy,
+      createdAt: (colCreated >= 0 ? stripLeadingQuote(row[colCreated]) : '') || existing?.createdAt || '',
+      approvedAt: colApprovedAt >= 0 ? stripLeadingQuote(row[colApprovedAt]) || undefined : existing?.approvedAt,
+      approvedBy: colApprovedBy >= 0 ? stripLeadingQuote(row[colApprovedBy]) || undefined : existing?.approvedBy,
     });
   }
 
   return parsed.length > 0 ? parsed : fallbackUsers;
 };
+
 
 /**
  * Build the 3-sheet structured data where on every sheet,
@@ -499,6 +544,538 @@ export const buildFourSheetsData = (
     ...base,
     accountSheetRows: buildUsersAccountSheetRows(users),
   };
+};
+
+const ACCOUNT_HEADERS = [
+  'STT',
+  'ID tài khoản',
+  'Họ và tên',
+  'Email đăng nhập',
+  'Mật khẩu',
+  'Số điện thoại',
+  'Phòng ban / Đơn vị',
+  'Vai trò',
+  'Trạng thái',
+  'Ngày tạo',
+  'Ngày duyệt',
+  'Người duyệt',
+];
+
+const MEDICINE_HEADERS = [
+  'ID',
+  'Mã thuốc',
+  'Tên biệt dược',
+  'Hoạt chất',
+  'Hàm lượng',
+  'ĐVT',
+  'Quy cách',
+  'Dạng bào chế',
+  'Đường dùng',
+  'Nhà sản xuất',
+  'Nhóm thuốc',
+  'Tồn tối thiểu',
+  'Trạng thái',
+  'Ghi chú',
+  'Ngày tạo',
+];
+
+const BENEFICIARY_HEADERS = [
+  'ID',
+  'Mã ĐT',
+  'Họ và tên',
+  'Giới tính',
+  'Năm sinh',
+  'CCCD',
+  'Số thẻ BHYT',
+  'Khu phòng',
+  'Trạng thái',
+  'Ghi chú',
+  'Ngày tạo',
+];
+
+const RECEIPT_DETAIL_HEADERS = [
+  'ID',
+  'Số phiếu nhập',
+  'Ngày nhập',
+  'Người giao',
+  'Bộ phận giao',
+  'Nhà cung cấp',
+  'Số hóa đơn',
+  'Ngày hóa đơn',
+  'Nội dung',
+  'Nguồn thuốc',
+  'ID đối tượng',
+  'Tên đối tượng',
+  'Số chứng từ kèm',
+  'Tổng tiền',
+  'Trạng thái',
+  'ID người tạo',
+  'Tên người tạo',
+  'Ngày tạo',
+  'Người duyệt',
+  'ChiTietJSON',
+];
+
+const ISSUE_DETAIL_HEADERS = [
+  'ID',
+  'Số phiếu xuất',
+  'Ngày xuất',
+  'Người nhận',
+  'Bộ phận nhận',
+  'Lý do xuất',
+  'ID đối tượng',
+  'Tên đối tượng',
+  'ID đơn thuốc',
+  'Địa điểm sử dụng',
+  'Tổng tiền',
+  'Trạng thái',
+  'ID người tạo',
+  'Tên người tạo',
+  'Ngày tạo',
+  'Người duyệt',
+  'ChiTietJSON',
+];
+
+const PRESCRIPTION_TX_HEADERS = ['LoaiBanGhi', 'ID', 'MaChungTu', 'Ngay', 'MoTa', 'DuLieuJSON'];
+const TEMPLATE_SETTINGS_HEADERS = ['Khoa', 'GiaTri'];
+
+const TRANSIENT_TEMPLATE_KEYS = new Set<string>([
+  'appsScriptUrl',
+  'googleSheetUrl',
+  'googleSpreadsheetId',
+  'googleUserEmail',
+  'syncMode',
+  'lastSyncChannel',
+  'lastBackupTime',
+  'lastBackupMessage',
+]);
+
+export const rowsWithHeadersTo2D = (headers: string[], rows: Record<string, any>[]): any[][] => {
+  const values = (rows || []).map((r) =>
+    headers.map((h) => {
+      const v = r[h];
+      return v !== undefined && v !== null ? v : '';
+    })
+  );
+  return [headers, ...values];
+};
+
+export const jsonObjectsTo2D = (rows: Record<string, any>[], fallbackHeaders: string[] = []): any[][] => {
+  if (!rows || rows.length === 0) {
+    return fallbackHeaders.length > 0 ? [fallbackHeaders] : [];
+  }
+  const headers = Object.keys(rows[0]);
+  return rowsWithHeadersTo2D(headers, rows);
+};
+
+export const buildAllTenSheetsData = (params: {
+  beneficiaries: Beneficiary[];
+  receipts: StockReceipt[];
+  issues: StockIssue[];
+  medicines: Medicine[];
+  prescriptions: Prescription[];
+  transactions: StockTransaction[];
+  auditLogs: AuditLog[];
+  syncedFiles?: DriveSyncedFile[];
+  templateSettings: TemplateSettings;
+  users: User[];
+}): AllTenSheetsData => {
+  const four = buildFourSheetsData(
+    params.beneficiaries,
+    params.receipts,
+    params.issues,
+    params.medicines,
+    params.transactions,
+    params.users
+  );
+
+  const medicinesSheetRows = (params.medicines || []).map((m) => ({
+    'ID': m.id,
+    'Mã thuốc': m.code,
+    'Tên biệt dược': m.name,
+    'Hoạt chất': m.activeIngredient || '',
+    'Hàm lượng': m.concentration || '',
+    'ĐVT': m.unit || '',
+    'Quy cách': m.packaging || '',
+    'Dạng bào chế': m.dosageForm || '',
+    'Đường dùng': m.route || '',
+    'Nhà sản xuất': m.manufacturer || '',
+    'Nhóm thuốc': m.category || '',
+    'Tồn tối thiểu': Number(m.minStockAlert) || 0,
+    'Trạng thái': m.status || 'Đang sử dụng',
+    'Ghi chú': m.note || '',
+    'Ngày tạo': m.createdAt || '',
+  }));
+
+  const beneficiariesSheetRows = (params.beneficiaries || []).map((b) => ({
+    'ID': b.id,
+    'Mã ĐT': b.code,
+    'Họ và tên': b.fullName,
+    'Giới tính': b.gender,
+    'Năm sinh': Number(b.birthYear) || 1970,
+    'CCCD': b.idCard || '',
+    'Số thẻ BHYT': b.insuranceNumber || '',
+    'Khu phòng': b.roomArea || '',
+    'Trạng thái': b.status || 'Đang quản lý',
+    'Ghi chú': b.note || '',
+    'Ngày tạo': b.createdAt || '',
+  }));
+
+  const receiptDetailsSheetRows = (params.receipts || []).map((r) => ({
+    'ID': r.id,
+    'Số phiếu nhập': r.receiptCode,
+    'Ngày nhập': r.receiptDate,
+    'Người giao': r.delivererName || '',
+    'Bộ phận giao': r.delivererDept || '',
+    'Nhà cung cấp': r.supplierName || '',
+    'Số hóa đơn': r.invoiceNumber || '',
+    'Ngày hóa đơn': r.invoiceDate || '',
+    'Nội dung': r.content || '',
+    'Nguồn thuốc': r.sourceType || 'BHYT_MUA_NGOAI',
+    'ID đối tượng': r.beneficiaryId || '',
+    'Tên đối tượng': r.beneficiaryName || '',
+    'Số chứng từ kèm': r.attachedDocCount ?? 0,
+    'Tổng tiền': Number(r.totalAmount) || 0,
+    'Trạng thái': r.status || 'APPROVED',
+    'ID người tạo': r.createdBy || '',
+    'Tên người tạo': r.createdByName || '',
+    'Ngày tạo': r.createdAt || '',
+    'Người duyệt': r.approvedBy || '',
+    'ChiTietJSON': JSON.stringify(r.items || []),
+  }));
+
+  const issueDetailsSheetRows = (params.issues || []).map((i) => ({
+    'ID': i.id,
+    'Số phiếu xuất': i.issueCode,
+    'Ngày xuất': i.issueDate,
+    'Người nhận': i.receiverName || '',
+    'Bộ phận nhận': i.receiverDept || '',
+    'Lý do xuất': i.reason || '',
+    'ID đối tượng': i.beneficiaryId || '',
+    'Tên đối tượng': i.beneficiaryName || '',
+    'ID đơn thuốc': i.prescriptionId || '',
+    'Địa điểm sử dụng': i.usageLocation || '',
+    'Tổng tiền': Number(i.totalAmount) || 0,
+    'Trạng thái': i.status || 'APPROVED',
+    'ID người tạo': i.createdBy || '',
+    'Tên người tạo': i.createdByName || '',
+    'Ngày tạo': i.createdAt || '',
+    'Người duyệt': i.approvedBy || '',
+    'ChiTietJSON': JSON.stringify(i.items || []),
+  }));
+
+  const prescriptionsTransactionsSheetRows: any[] = [
+    ...(params.prescriptions || []).map((p) => ({
+      'LoaiBanGhi': 'PRESCRIPTION',
+      'ID': p.id,
+      'MaChungTu': p.code,
+      'Ngay': p.prescriptionDate,
+      'MoTa': `${p.doctorName} - ${p.diagnosis}`,
+      'DuLieuJSON': JSON.stringify(p),
+    })),
+    ...(params.transactions || []).map((t) => ({
+      'LoaiBanGhi': 'TRANSACTION',
+      'ID': t.id,
+      'MaChungTu': t.refCode,
+      'Ngay': t.date,
+      'MoTa': `${t.type} (${t.batchNumber}) SL: ${t.quantity}`,
+      'DuLieuJSON': JSON.stringify(t),
+    })),
+    ...(params.auditLogs || []).slice(0, 100).map((a) => ({
+      'LoaiBanGhi': 'AUDIT_LOG',
+      'ID': a.id,
+      'MaChungTu': a.entityId,
+      'Ngay': a.timestamp,
+      'MoTa': `${a.userName}: ${a.action} - ${a.details}`,
+      'DuLieuJSON': JSON.stringify(a),
+    })),
+    ...(params.syncedFiles || []).slice(0, 50).map((f) => ({
+      'LoaiBanGhi': 'SYNCED_FILE',
+      'ID': f.id,
+      'MaChungTu': f.docCode,
+      'Ngay': f.createdAt,
+      'MoTa': f.fileName,
+      'DuLieuJSON': JSON.stringify(f),
+    })),
+  ];
+
+  const templateSettingsSheetRows = Object.entries(params.templateSettings || {})
+    .filter(([k]) => !TRANSIENT_TEMPLATE_KEYS.has(k))
+    .map(([k, v]) => ({
+      'Khoa': k,
+      'GiaTri': v !== undefined && v !== null ? String(v) : '',
+    }));
+
+  return {
+    ...four,
+    medicinesSheetRows,
+    beneficiariesSheetRows,
+    receiptDetailsSheetRows,
+    issueDetailsSheetRows,
+    prescriptionsTransactionsSheetRows,
+    templateSettingsSheetRows,
+  };
+};
+
+export const buildAllTenSheets2D = (params: {
+  beneficiaries: Beneficiary[];
+  receipts: StockReceipt[];
+  issues: StockIssue[];
+  medicines: Medicine[];
+  prescriptions: Prescription[];
+  transactions: StockTransaction[];
+  auditLogs: AuditLog[];
+  syncedFiles?: DriveSyncedFile[];
+  templateSettings: TemplateSettings;
+  users: User[];
+}): Record<string, any[][]> => {
+  const data = buildAllTenSheetsData(params);
+  return {
+    'Phiếu nhập': jsonObjectsTo2D(data.receiptSheetRows),
+    'Phiếu xuất': jsonObjectsTo2D(data.issueSheetRows),
+    'Báo cáo': jsonObjectsTo2D(data.reportSheetRows),
+    'Tài khoản': rowsWithHeadersTo2D(ACCOUNT_HEADERS, data.accountSheetRows),
+    'DanhMuc_Thuoc': rowsWithHeadersTo2D(MEDICINE_HEADERS, data.medicinesSheetRows),
+    'DoiTuong': rowsWithHeadersTo2D(BENEFICIARY_HEADERS, data.beneficiariesSheetRows),
+    'ChiTiet_PhieuNhap': rowsWithHeadersTo2D(RECEIPT_DETAIL_HEADERS, data.receiptDetailsSheetRows),
+    'ChiTiet_PhieuXuat': rowsWithHeadersTo2D(ISSUE_DETAIL_HEADERS, data.issueDetailsSheetRows),
+    'DonThuoc_GiaoDich': rowsWithHeadersTo2D(
+      PRESCRIPTION_TX_HEADERS,
+      data.prescriptionsTransactionsSheetRows
+    ),
+    'CauHinh_BieuMau': rowsWithHeadersTo2D(TEMPLATE_SETTINGS_HEADERS, data.templateSettingsSheetRows),
+  };
+};
+
+const safeParseJson = <T,>(raw: any, fallback: T): T => {
+  try {
+    const str = stripLeadingQuote(raw);
+    if (!str) return fallback;
+    return JSON.parse(str) as T;
+  } catch {
+    return fallback;
+  }
+};
+
+const rows2DToObjects = (rows2D?: any[][]): Record<string, any>[] => {
+  if (!Array.isArray(rows2D) || rows2D.length < 2) return [];
+  const headers = rows2D[0].map((h) => String(h || '').trim());
+  const out: Record<string, any>[] = [];
+  for (let i = 1; i < rows2D.length; i++) {
+    const row = rows2D[i];
+    if (!Array.isArray(row)) continue;
+    const hasValue = row.some((c) => c !== '' && c !== null && c !== undefined);
+    if (!hasValue) continue;
+    const obj: Record<string, any> = {};
+    headers.forEach((h, idx) => {
+      if (h) obj[h] = row[idx];
+    });
+    out.push(obj);
+  }
+  return out;
+};
+
+export interface ParsedTenSheetsState {
+  medicines?: Medicine[];
+  beneficiaries?: Beneficiary[];
+  receipts?: StockReceipt[];
+  issues?: StockIssue[];
+  prescriptions?: Prescription[];
+  transactions?: StockTransaction[];
+  auditLogs?: AuditLog[];
+  syncedFiles?: DriveSyncedFile[];
+  templateSettings?: Partial<TemplateSettings>;
+}
+
+/**
+ * Parse the 6 structured system tabs back into complete domain objects.
+ */
+export const parseAllTenSheetsData = (
+  tables: Record<string, any[][] | undefined>
+): ParsedTenSheetsState => {
+  const result: ParsedTenSheetsState = {};
+
+  // 1. DanhMuc_Thuoc
+  const medRows2D = tables['DanhMuc_Thuoc'];
+  if (Array.isArray(medRows2D) && medRows2D.length >= 2) {
+    const objs = rows2DToObjects(medRows2D);
+    result.medicines = objs
+      .filter((o) => stripLeadingQuote(o['ID']) || stripLeadingQuote(o['Tên biệt dược']))
+      .map((o, idx) => ({
+        id: stripLeadingQuote(o['ID']) || `med-sheet-${idx}`,
+        code: stripLeadingQuote(o['Mã thuốc']) || `TH-${String(idx + 1).padStart(3, '0')}`,
+        name: stripLeadingQuote(o['Tên biệt dược']) || 'Thuốc chưa đặt tên',
+        activeIngredient: stripLeadingQuote(o['Hoạt chất']),
+        concentration: stripLeadingQuote(o['Hàm lượng']),
+        unit: stripLeadingQuote(o['ĐVT']) || 'Viên',
+        packaging: stripLeadingQuote(o['Quy cách']),
+        dosageForm: stripLeadingQuote(o['Dạng bào chế']),
+        route: stripLeadingQuote(o['Đường dùng']) || 'Uống',
+        manufacturer: stripLeadingQuote(o['Nhà sản xuất']),
+        category: stripLeadingQuote(o['Nhóm thuốc']) || 'Khác',
+        minStockAlert: Number(o['Tồn tối thiểu']) || 0,
+        status:
+          stripLeadingQuote(o['Trạng thái']) === 'Ngừng sử dụng'
+            ? 'Ngừng sử dụng'
+            : 'Đang sử dụng',
+        note: stripLeadingQuote(o['Ghi chú']) || undefined,
+        createdAt: stripLeadingQuote(o['Ngày tạo']) || '',
+      }));
+  }
+
+  // 2. DoiTuong
+  const benRows2D = tables['DoiTuong'];
+  if (Array.isArray(benRows2D) && benRows2D.length >= 2) {
+    const objs = rows2DToObjects(benRows2D);
+    result.beneficiaries = objs
+      .filter((o) => stripLeadingQuote(o['ID']) || stripLeadingQuote(o['Họ và tên']))
+      .map((o, idx) => {
+        const rawStatus = stripLeadingQuote(o['Trạng thái']);
+        const validStatus: Beneficiary['status'] =
+          rawStatus === 'Tạm vắng' ||
+          rawStatus === 'Đã chuyển tuyến' ||
+          rawStatus === 'Đã xuất viện'
+            ? rawStatus
+            : 'Đang quản lý';
+        return {
+          id: stripLeadingQuote(o['ID']) || `ben-sheet-${idx}`,
+          code: stripLeadingQuote(o['Mã ĐT']) || `DT-${String(idx + 1).padStart(3, '0')}`,
+          fullName: stripLeadingQuote(o['Họ và tên']) || 'Đối tượng',
+          gender: stripLeadingQuote(o['Giới tính']) === 'Nữ' ? 'Nữ' : 'Nam',
+          birthYear: Number(o['Năm sinh']) || 1970,
+          idCard: stripLeadingQuote(o['CCCD']) || undefined,
+          insuranceNumber: stripLeadingQuote(o['Số thẻ BHYT']) || undefined,
+          roomArea: stripLeadingQuote(o['Khu phòng']) || 'Phòng Y tế - PHCN',
+          status: validStatus,
+          note: stripLeadingQuote(o['Ghi chú']) || undefined,
+          createdAt: stripLeadingQuote(o['Ngày tạo']) || '',
+        };
+      });
+  }
+
+  // 3. ChiTiet_PhieuNhap
+  const rcpRows2D = tables['ChiTiet_PhieuNhap'];
+  if (Array.isArray(rcpRows2D) && rcpRows2D.length >= 1) {
+    const objs = rows2DToObjects(rcpRows2D);
+    if (rcpRows2D.length >= 2 || objs.length > 0) {
+      result.receipts = objs
+        .filter((o) => stripLeadingQuote(o['ID']) || stripLeadingQuote(o['Số phiếu nhập']))
+        .map((o, idx) => {
+          const rawStatus = stripLeadingQuote(o['Trạng thái']);
+          const status: StockReceipt['status'] =
+            rawStatus === 'DRAFT' || rawStatus === 'CANCELLED' ? rawStatus : 'APPROVED';
+          const rawSource = stripLeadingQuote(o['Nguồn thuốc']) as MedicineSourceType;
+          const items = safeParseJson<StockReceiptItem[]>(o['ChiTietJSON'], []);
+          return {
+            id: stripLeadingQuote(o['ID']) || `rcp-sheet-${idx}`,
+            receiptCode: stripLeadingQuote(o['Số phiếu nhập']),
+            receiptDate: stripLeadingQuote(o['Ngày nhập']),
+            delivererName: stripLeadingQuote(o['Người giao']),
+            delivererDept: stripLeadingQuote(o['Bộ phận giao']),
+            supplierName: stripLeadingQuote(o['Nhà cung cấp']),
+            invoiceNumber: stripLeadingQuote(o['Số hóa đơn']),
+            invoiceDate: stripLeadingQuote(o['Ngày hóa đơn']),
+            content: stripLeadingQuote(o['Nội dung']),
+            sourceType: rawSource || 'BHYT_MUA_NGOAI',
+            beneficiaryId: stripLeadingQuote(o['ID đối tượng']) || undefined,
+            beneficiaryName: stripLeadingQuote(o['Tên đối tượng']) || undefined,
+            attachedDocCount: Number(o['Số chứng từ kèm']) || 0,
+            totalAmount: Number(o['Tổng tiền']) || 0,
+            status,
+            createdBy: stripLeadingQuote(o['ID người tạo']),
+            createdByName: stripLeadingQuote(o['Tên người tạo']),
+            createdAt: stripLeadingQuote(o['Ngày tạo']),
+            approvedBy: stripLeadingQuote(o['Người duyệt']) || undefined,
+            items: Array.isArray(items) ? items : [],
+          };
+        });
+    }
+  }
+
+  // 4. ChiTiet_PhieuXuat
+  const issRows2D = tables['ChiTiet_PhieuXuat'];
+  if (Array.isArray(issRows2D) && issRows2D.length >= 1) {
+    const objs = rows2DToObjects(issRows2D);
+    if (issRows2D.length >= 2 || objs.length > 0) {
+      result.issues = objs
+        .filter((o) => stripLeadingQuote(o['ID']) || stripLeadingQuote(o['Số phiếu xuất']))
+        .map((o, idx) => {
+          const rawStatus = stripLeadingQuote(o['Trạng thái']);
+          const status: StockIssue['status'] =
+            rawStatus === 'DRAFT' || rawStatus === 'CANCELLED' ? rawStatus : 'APPROVED';
+          const items = safeParseJson<StockIssueItem[]>(o['ChiTietJSON'], []);
+          return {
+            id: stripLeadingQuote(o['ID']) || `iss-sheet-${idx}`,
+            issueCode: stripLeadingQuote(o['Số phiếu xuất']),
+            issueDate: stripLeadingQuote(o['Ngày xuất']),
+            receiverName: stripLeadingQuote(o['Người nhận']),
+            receiverDept: stripLeadingQuote(o['Bộ phận nhận']),
+            reason: stripLeadingQuote(o['Lý do xuất']),
+            beneficiaryId: stripLeadingQuote(o['ID đối tượng']),
+            beneficiaryName: stripLeadingQuote(o['Tên đối tượng']) || undefined,
+            prescriptionId: stripLeadingQuote(o['ID đơn thuốc']) || undefined,
+            usageLocation: stripLeadingQuote(o['Địa điểm sử dụng']),
+            totalAmount: Number(o['Tổng tiền']) || 0,
+            status,
+            createdBy: stripLeadingQuote(o['ID người tạo']),
+            createdByName: stripLeadingQuote(o['Tên người tạo']),
+            createdAt: stripLeadingQuote(o['Ngày tạo']),
+            approvedBy: stripLeadingQuote(o['Người duyệt']) || undefined,
+            items: Array.isArray(items) ? items : [],
+          };
+        });
+    }
+  }
+
+  // 5. DonThuoc_GiaoDich
+  const ptxRows2D = tables['DonThuoc_GiaoDich'];
+  if (Array.isArray(ptxRows2D) && ptxRows2D.length >= 2) {
+    const objs = rows2DToObjects(ptxRows2D);
+    const prescriptions: Prescription[] = [];
+    const transactions: StockTransaction[] = [];
+    const auditLogs: AuditLog[] = [];
+    const syncedFiles: DriveSyncedFile[] = [];
+
+    objs.forEach((o) => {
+      const kind = stripLeadingQuote(o['LoaiBanGhi']).toUpperCase();
+      const parsed = safeParseJson<any>(o['DuLieuJSON'], null);
+      if (!parsed || typeof parsed !== 'object') return;
+      if (kind === 'PRESCRIPTION') prescriptions.push(parsed as Prescription);
+      else if (kind === 'TRANSACTION') transactions.push(parsed as StockTransaction);
+      else if (kind === 'AUDIT_LOG') auditLogs.push(parsed as AuditLog);
+      else if (kind === 'SYNCED_FILE') syncedFiles.push(parsed as DriveSyncedFile);
+    });
+
+    result.prescriptions = prescriptions;
+    result.transactions = transactions;
+    if (auditLogs.length > 0) result.auditLogs = auditLogs;
+    if (syncedFiles.length > 0) result.syncedFiles = syncedFiles;
+  }
+
+  // 6. CauHinh_BieuMau
+  const cfgRows2D = tables['CauHinh_BieuMau'];
+  if (Array.isArray(cfgRows2D) && cfgRows2D.length >= 2) {
+    const objs = rows2DToObjects(cfgRows2D);
+    const partialCfg: Record<string, any> = {};
+    objs.forEach((o) => {
+      const k = stripLeadingQuote(o['Khoa']);
+      if (!k || TRANSIENT_TEMPLATE_KEYS.has(k)) return;
+      const rawVal = stripLeadingQuote(o['GiaTri']);
+      if (k in DEFAULT_TEMPLATE_SETTINGS) {
+        const defaultVal = (DEFAULT_TEMPLATE_SETTINGS as any)[k];
+        if (typeof defaultVal === 'boolean') {
+          partialCfg[k] = rawVal.toLowerCase() === 'true';
+        } else {
+          partialCfg[k] = rawVal;
+        }
+      }
+    });
+    if (Object.keys(partialCfg).length > 0) {
+      result.templateSettings = partialCfg as Partial<TemplateSettings>;
+    }
+  }
+
+  return result;
 };
 
 /**

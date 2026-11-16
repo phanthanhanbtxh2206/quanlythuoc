@@ -37,6 +37,7 @@ export const UserManagementView: React.FC = () => {
     templateSettings,
     isPullingFromCloud,
     isGoogleAuthenticated,
+    appsScriptOutdatedWarning,
   } = useApp();
 
   const [activeTab, setActiveTab] = useState<'users' | 'matrix'>('users');
@@ -105,6 +106,17 @@ export const UserManagementView: React.FC = () => {
 
   useEffect(() => {
     void refreshUsersDirectory();
+    const onFocus = () => {
+      if (document.visibilityState === 'visible') {
+        void refreshUsersDirectory();
+      }
+    };
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onFocus);
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onFocus);
+    };
   }, [refreshUsersDirectory]);
 
   const handleRefreshDirectory = async () => {
@@ -412,16 +424,23 @@ export const UserManagementView: React.FC = () => {
                   className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-amber-300 bg-white hover:bg-amber-100/70 text-amber-900 text-[11px] font-semibold transition-colors disabled:opacity-50"
                 >
                   <RefreshCw className={`w-3 h-3 ${isRefreshingUsers || isPullingFromCloud ? 'animate-spin' : ''}`} />
-                  <span>{isRefreshingUsers || isPullingFromCloud ? 'Đang tải...' : 'Làm mới'}</span>
+                  <span>{isRefreshingUsers || isPullingFromCloud ? 'Đang tải...' : 'Làm mới từ Sheets'}</span>
                 </button>
               </div>
             </div>
+
+            {isAdmin && appsScriptOutdatedWarning && (
+              <div className="px-4 py-2 bg-rose-50 border-b border-rose-200 text-[11px] text-rose-800 flex items-center gap-2">
+                <AlertCircle className="w-3.5 h-3.5 text-rose-600 shrink-0" />
+                <span>{appsScriptOutdatedWarning}</span>
+              </div>
+            )}
 
             {isAdmin && !hasCloudSheetConnection && (
               <div className="px-4 py-2 bg-slate-50 border-b border-slate-200 text-[11px] text-slate-600 flex items-center gap-2">
                 <AlertCircle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
                 <span>
-                  Chưa gắn URL Apps Script hoặc kết nối Google OAuth trong mục <strong>Đồng Bộ Sheets & Drive</strong> — tài khoản mới đang chờ trong hàng đợi máy chủ và sẽ tự động ghi lên tab <strong>Tài khoản</strong> ngay khi kết nối.
+                  Chưa gắn URL Apps Script hoặc kết nối Google OAuth trong mục <strong>Đồng Bộ Sheets &amp; Drive</strong> — tài khoản mới đang chờ trong hàng đợi máy chủ và sẽ tự động ghi lên tab <strong>Tài khoản</strong> ngay khi kết nối.
                 </span>
               </div>
             )}

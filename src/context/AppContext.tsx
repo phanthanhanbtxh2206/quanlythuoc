@@ -27,12 +27,12 @@ import {
   TemplateSettings,
   DEFAULT_TEMPLATE_SETTINGS,
   BackupLog,
-  CloudStateSnapshot,
 } from '../types';
 import {
   downloadThreeSheetsExcelWorkbook,
   downloadThreeSheetsCSV,
   parseUsersFromAccountSheet,
+  parseAllTenSheetsData,
 } from '../utils/googleSheetsBackup';
 import {
   initGoogleAuth,
@@ -42,7 +42,7 @@ import {
 } from '../services/googleAuth';
 import {
   syncAllDataToGoogleSheets,
-  readAccountSheetViaOAuth,
+  readAllSheetsViaOAuth,
   GoogleSheetsSyncResult,
   extractSpreadsheetId,
   GOOGLE_SAMPLE_READONLY_ID,
@@ -50,18 +50,17 @@ import {
 import {
   syncAllDataViaAppsScript,
   syncAccountSheetViaAppsScript,
+  registerAccountViaAppsScript,
+  updateAccountViaAppsScript,
   pullAllDataViaAppsScript,
   uploadDocumentViaAppsScript,
   testAppsScriptConnection,
   isValidAppsScriptUrl,
-  DRIVE_STATE_FILENAME,
+  isDuplicateAccountError,
+  APPS_SCRIPT_REQUIRED_VERSION,
   AppsScriptPingResult,
 } from '../services/appsScriptSyncService';
-import {
-  uploadFileToGoogleDrive,
-  upsertJsonFileInGoogleDrive,
-  readJsonFileFromGoogleDrive,
-} from '../services/googleDriveService';
+import { uploadFileToGoogleDrive } from '../services/googleDriveService';
 import {
   INITIAL_USERS,
   INITIAL_BENEFICIARIES,
@@ -80,6 +79,7 @@ interface CloudPullResult {
   success: boolean;
   usersUpdated?: number;
   restoredFromDrive?: boolean;
+  seededToSheets?: boolean;
   timestamp?: string;
   error?: string;
 }
@@ -100,17 +100,18 @@ interface AppContextType {
   templateSettings: TemplateSettings;
   backupLogs: BackupLog[];
 
-  // Google Sheets & Drive Bidirectional Sync
+  // Google Sheets Bidirectional Sync (10 Tabs in 1 File)
   googleUser: any;
   isGoogleAuthenticated: boolean;
   isSyncingSheets: boolean;
   isPullingFromCloud: boolean;
   syncSheetsError: string | null;
+  appsScriptOutdatedWarning: string | null;
   lastSheetsSyncResult: GoogleSheetsSyncResult | null;
   loginWithGoogle: () => Promise<{ success: boolean; error?: string; cancelled?: boolean }>;
   logoutFromGoogle: () => Promise<void>;
   syncNowToGoogleSheets: (skipConfirm?: boolean) => Promise<GoogleSheetsSyncResult | null>;
-  pullFromSheetsAndDrive: (silent?: boolean) => Promise<CloudPullResult>;
+  pullFromSheetsAndDrive: (silent?: boolean, options?: { seedIfEmpty?: boolean }) => Promise<CloudPullResult>;
   testAppsScriptSync: (url: string) => Promise<AppsScriptPingResult>;
 
   // Template & Auto-backup Actions
@@ -466,7 +467,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           medicines: INITIAL_MEDICINES.length,
           beneficiaries: INITIAL_BENEFICIARIES.length,
         },
-        details: 'Sẵn sàng đồng bộ hai chiều 04 Sheet (kể cả Tài khoản) và Google Drive JSON.',
+        details: 'Sẵn sàng đồng bộ toàn bộ 10 tab dữ liệu trực tiếp trên 01 tệp Google Sheets.',
       },
     ];
   });
@@ -847,22 +848,43 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         updated.googleSpreadsheetId = parsedId === GOOGLE_SAMPLE_READONLY_ID ? '' : parsedId;
       }
       latestStateRef.current.templateSettings = updated;
-      addAuditLog('CẤU_HÌNH', 'BIỂU_MẪU', 'TEMPLATE', 'Cập nhật cấu hình biểu mẫu mặc định của Trung tâm');
+      addAuditLog('CẤU_HÌNH', 'BIỂU_MẪU', 'TEMPLATE', 'Cập nhật cấu hình biểu mẫu & kết nối đồng bộ');
+      const hasFormKeyChange = Object.keys(newSettings).some(
+        (k) =>
+          ![
+            'appsScriptUrl',
+            'googleSheetUrl',
+            'googleSpreadsheetId',
+            'googleUserEmail',
+            'syncMode',
+            'lastSyncChannel',
+            'lastBackupTime',
+            'lastBackupMessage',
+          ].includes(k)
+      );
+      if (hasFormKeyChange) {
+        setTimeout(() => triggerAutoBackup('Cập nhật cấu hình biểu mẫu mặc định'), 50);
+      }
       return updated;
     });
   };
 
   const resetTemplateSettings = () => {
     const cleanDefault = migrateTemplateSettings(DEFAULT_TEMPLATE_SETTINGS);
-    setTemplateSettings((prev) => ({
-      ...cleanDefault,
-      appsScriptUrl: prev.appsScriptUrl,
-      googleSheetUrl: prev.googleSheetUrl,
-      googleSpreadsheetId: prev.googleSpreadsheetId,
-      googleDriveFolder: prev.googleDriveFolder,
-      syncMode: prev.syncMode,
-    }));
+    setTemplateSettings((prev) => {
+      const updated = {
+        ...cleanDefault,
+        appsScriptUrl: prev.appsScriptUrl,
+        googleSheetUrl: prev.googleSheetUrl,
+        googleSpreadsheetId: prev.googleSpreadsheetId,
+        googleDriveFolder: prev.googleDriveFolder,
+        syncMode: prev.syncMode,
+      };
+      latestStateRef.current.templateSettings = updated;
+      return updated;
+    });
     addAuditLog('KHÔI_PHỤC_BIỂU_MẪU', 'BIỂU_MẪU', 'TEMPLATE', 'Đặt lại nhãn chữ trên biểu mẫu về mặc định');
+    setTimeout(() => triggerAutoBackup('Khôi phục cấu hình biểu mẫu mặc định'), 50);
   };
 
   // Google Sheets Auto-Sync States
@@ -871,7 +893,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [isSyncingSheets, setIsSyncingSheets] = useState<boolean>(false);
   const [isPullingFromCloud, setIsPullingFromCloud] = useState<boolean>(false);
   const [syncSheetsError, setSyncSheetsError] = useState<string | null>(null);
+  const [appsScriptOutdatedWarning, setAppsScriptOutdatedWarning] = useState<string | null>(null);
   const [lastSheetsSyncResult, setLastSheetsSyncResult] = useState<GoogleSheetsSyncResult | null>(null);
+
+  const executeHybridSheetsSyncRef = useRef<
+    ((token: string | null, reason: string, settingsOverride?: TemplateSettings) => Promise<GoogleSheetsSyncResult | null>) | null
+  >(null);
 
   // Initialize Firebase Google OAuth listener
   useEffect(() => {
@@ -888,286 +915,294 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return () => unsubscribe();
   }, []);
 
-  const buildSnapshotPayload = useCallback((): CloudStateSnapshot => {
-    const snap = latestStateRef.current;
-    return {
-      version: 2,
-      updatedAt: new Date().toISOString(),
-      updatedBy: snap.currentUser?.fullName || 'Hệ thống',
-      users: snap.users,
-      beneficiaries: snap.beneficiaries,
-      medicines: snap.medicines,
-      receipts: snap.receipts,
-      issues: snap.issues,
-      prescriptions: snap.prescriptions,
-      transactions: snap.transactions,
-      auditLogs: snap.auditLogs.slice(0, 100),
-      syncedFiles: snap.syncedFiles.slice(0, 100),
-      templateSettings: {
-        ...snap.templateSettings,
-      },
-    };
-  }, []);
-
-  // Bidirectional PULL from Google Sheets ("Tài khoản") & Google Drive (btxh_pharmacy_state.json)
-  const pullFromSheetsAndDrive = useCallback(async (silent = false): Promise<CloudPullResult> => {
-    const activeSettings = latestStateRef.current.templateSettings;
-    const hasAppsScript = isValidAppsScriptUrl(activeSettings.appsScriptUrl);
-    const token = await getAccessToken();
-
-    if (!hasAppsScript && !token) {
-      const msg = 'Chưa cấu hình URL Google Apps Script hoặc phiên Google OAuth để kéo dữ liệu hai chiều.';
-      if (!silent) setSyncSheetsError(msg);
-      return { success: false, error: msg };
-    }
-
-    setIsPullingFromCloud(true);
-    if (!silent) setSyncSheetsError(null);
-
+  const discoverSharedBridgeConfig = useCallback(async () => {
     try {
-      let accountRows: any[][] = [];
-      let stateJson: CloudStateSnapshot | null = null;
-      let pulledSheetId = activeSettings.googleSpreadsheetId || '';
-      let pulledSheetUrl = activeSettings.googleSheetUrl || '';
-      let timestamp = new Date().toLocaleTimeString('vi-VN') + ' ' + new Date().toLocaleDateString('vi-VN');
+      const cfgRes = await fetch('/api/cloud-bridge', { cache: 'no-store' });
+      const ct = cfgRes.headers.get('content-type') || '';
+      if (!cfgRes.ok || !ct.includes('application/json')) return latestStateRef.current.templateSettings;
+      const cfgData = await cfgRes.json();
+      const srvCfg = cfgData?.config;
+      if (srvCfg && typeof srvCfg === 'object') {
+        const cur = latestStateRef.current.templateSettings;
+        const nextAppsScriptUrl =
+          isValidAppsScriptUrl(cur.appsScriptUrl)
+            ? cur.appsScriptUrl
+            : srvCfg.appsScriptUrl || '';
+        const nextSheetUrl = cur.googleSheetUrl || srvCfg.googleSheetUrl || '';
+        const nextSheetId = cur.googleSpreadsheetId || srvCfg.googleSpreadsheetId || '';
+        const nextDriveFolder =
+          cur.googleDriveFolder || srvCfg.googleDriveFolder || 'QUAN_LY_THUOC_TRUNG_TAM/2026';
 
-      if (hasAppsScript) {
-        const res = await pullAllDataViaAppsScript(
-          activeSettings.appsScriptUrl,
-          activeSettings.googleDriveFolder || 'QUAN_LY_THUOC_TRUNG_TAM/2026'
-        );
-        if (!res.success) {
-          throw new Error(res.error || 'Không thể kéo dữ liệu qua Google Apps Script.');
-        }
-        accountRows = res.accountRows || [];
-        stateJson = res.stateJson || null;
-        if (res.spreadsheetId) pulledSheetId = res.spreadsheetId;
-        if (res.spreadsheetUrl) pulledSheetUrl = res.spreadsheetUrl;
-        if (res.timestamp) timestamp = res.timestamp;
-      } else if (token) {
-        if (pulledSheetId) {
-          accountRows = await readAccountSheetViaOAuth(token, pulledSheetId);
-        }
-        const driveRead = await readJsonFileFromGoogleDrive(
-          token,
-          activeSettings.googleDriveFolder || 'QUAN_LY_THUOC_TRUNG_TAM/2026',
-          DRIVE_STATE_FILENAME
-        );
-        if (driveRead.success && driveRead.content) {
-          stateJson = JSON.parse(driveRead.content) as CloudStateSnapshot;
+        if (
+          nextAppsScriptUrl !== cur.appsScriptUrl ||
+          nextSheetUrl !== cur.googleSheetUrl ||
+          nextSheetId !== cur.googleSpreadsheetId
+        ) {
+          const updated = migrateTemplateSettings({
+            ...cur,
+            appsScriptUrl: nextAppsScriptUrl,
+            googleSheetUrl: nextSheetUrl,
+            googleSpreadsheetId: nextSheetId,
+            googleDriveFolder: nextDriveFolder,
+          });
+          latestStateRef.current.templateSettings = updated;
+          setTemplateSettings(updated);
+          return updated;
         }
       }
+    } catch {
+      // Static-only host fallback
+    }
+    return latestStateRef.current.templateSettings;
+  }, []);
 
-      let restoredFromDrive = false;
+  // Bidirectional PULL across all 10 tabs in the single Google Spreadsheet (zero Drive JSON dependency)
+  const pullFromSheetsAndDrive = useCallback(
+    async (silent = false, options?: { seedIfEmpty?: boolean }): Promise<CloudPullResult> => {
+      const activeSettings = latestStateRef.current.templateSettings;
+      const hasAppsScript = isValidAppsScriptUrl(activeSettings.appsScriptUrl);
+      const token = await getAccessToken();
 
-      // 1. Apply Drive JSON full state snapshot first
-      if (stateJson && typeof stateJson === 'object') {
-        restoredFromDrive = true;
-        if (Array.isArray(stateJson.beneficiaries) && stateJson.beneficiaries.length > 0) {
-          latestStateRef.current.beneficiaries = stateJson.beneficiaries;
-          setBeneficiaries(stateJson.beneficiaries);
+      if (!hasAppsScript && !token) {
+        const msg = 'Chưa cấu hình URL Google Apps Script hoặc phiên Google OAuth để kéo dữ liệu hai chiều.';
+        if (!silent) setSyncSheetsError(msg);
+        return { success: false, error: msg };
+      }
+
+      setIsPullingFromCloud(true);
+      if (!silent) setSyncSheetsError(null);
+
+      try {
+        let accountRows: any[][] = [];
+        let tables: Record<string, any[][]> = {};
+        let isSheetInitialized = false;
+        let pulledSheetId = activeSettings.googleSpreadsheetId || '';
+        let pulledSheetUrl = activeSettings.googleSheetUrl || '';
+        let scriptVersion: number | undefined;
+        let timestamp = new Date().toLocaleTimeString('vi-VN') + ' ' + new Date().toLocaleDateString('vi-VN');
+
+        if (hasAppsScript) {
+          const res = await pullAllDataViaAppsScript(activeSettings.appsScriptUrl);
+          if (!res.success) {
+            throw new Error(res.error || 'Không thể kéo dữ liệu qua Google Apps Script.');
+          }
+          scriptVersion = res.scriptVersion;
+          accountRows = res.accountRows || [];
+          tables = res.tables || {};
+          isSheetInitialized = Boolean(res.isSheetInitialized);
+          if (res.spreadsheetId) pulledSheetId = res.spreadsheetId;
+          if (res.spreadsheetUrl) pulledSheetUrl = res.spreadsheetUrl;
+          if (res.timestamp) timestamp = res.timestamp;
+
+          if (typeof scriptVersion === 'number' && scriptVersion < APPS_SCRIPT_REQUIRED_VERSION) {
+            setAppsScriptOutdatedWarning(
+              `Google Apps Script đang chạy phiên bản cũ (v${scriptVersion}). Admin vui lòng chép mã Code.gs v3 mới trong mục Đồng Bộ Sheets & Drive và bấm "Triển khai phiên bản mới" để tự động đồng bộ đầy đủ 10 tab & đăng ký tài khoản!`
+            );
+          } else {
+            setAppsScriptOutdatedWarning(null);
+          }
+        } else if (token) {
+          if (pulledSheetId) {
+            const oauthPull = await readAllSheetsViaOAuth(token, pulledSheetId);
+            accountRows = oauthPull.accountRows;
+            tables = oauthPull.tables;
+            isSheetInitialized = oauthPull.isSheetInitialized;
+          }
         }
-        if (Array.isArray(stateJson.medicines) && stateJson.medicines.length > 0) {
-          latestStateRef.current.medicines = stateJson.medicines;
-          setMedicines(stateJson.medicines);
+
+        // Case 1: Google Sheets is newly connected / empty -> keep current working data and seed all 10 tabs up!
+        if (!isSheetInitialized) {
+          let seededToSheets = false;
+          if (options?.seedIfEmpty !== false && executeHybridSheetsSyncRef.current) {
+            const seedRes = await executeHybridSheetsSyncRef.current(
+              token,
+              'Khởi tạo dữ liệu ban đầu lên 10 tab Google Sheets'
+            );
+            seededToSheets = Boolean(seedRes?.success);
+          }
+          hasPulledFromCloudRef.current = true;
+          return {
+            success: true,
+            usersUpdated: latestStateRef.current.users.length,
+            restoredFromDrive: false,
+            seededToSheets,
+            timestamp,
+          };
         }
-        if (Array.isArray(stateJson.receipts)) {
-          latestStateRef.current.receipts = stateJson.receipts;
-          setReceipts(stateJson.receipts);
+
+        // Case 2: Google Sheets already holds system data -> hydrate all domain tabs + merge Tài khoản safely
+        const parsedState = parseAllTenSheetsData(tables);
+        if (parsedState.beneficiaries && parsedState.beneficiaries.length > 0) {
+          latestStateRef.current.beneficiaries = parsedState.beneficiaries;
+          setBeneficiaries(parsedState.beneficiaries);
         }
-        if (Array.isArray(stateJson.issues)) {
-          latestStateRef.current.issues = stateJson.issues;
-          setIssues(stateJson.issues);
+        if (parsedState.medicines && parsedState.medicines.length > 0) {
+          latestStateRef.current.medicines = parsedState.medicines;
+          setMedicines(parsedState.medicines);
         }
-        if (Array.isArray(stateJson.prescriptions)) {
-          latestStateRef.current.prescriptions = stateJson.prescriptions;
-          setPrescriptions(stateJson.prescriptions);
+        if (parsedState.receipts !== undefined) {
+          latestStateRef.current.receipts = parsedState.receipts;
+          setReceipts(parsedState.receipts);
         }
-        if (Array.isArray(stateJson.transactions)) {
-          latestStateRef.current.transactions = stateJson.transactions;
-          setTransactions(stateJson.transactions);
+        if (parsedState.issues !== undefined) {
+          latestStateRef.current.issues = parsedState.issues;
+          setIssues(parsedState.issues);
         }
-        if (Array.isArray(stateJson.auditLogs) && stateJson.auditLogs.length > 0) {
-          latestStateRef.current.auditLogs = stateJson.auditLogs;
-          setAuditLogs(stateJson.auditLogs);
+        if (parsedState.prescriptions !== undefined) {
+          latestStateRef.current.prescriptions = parsedState.prescriptions;
+          setPrescriptions(parsedState.prescriptions);
         }
-        if (Array.isArray(stateJson.syncedFiles)) {
-          latestStateRef.current.syncedFiles = stateJson.syncedFiles;
-          setSyncedFiles(stateJson.syncedFiles);
+        if (parsedState.transactions !== undefined) {
+          latestStateRef.current.transactions = parsedState.transactions;
+          setTransactions(parsedState.transactions);
         }
-        if (stateJson.templateSettings) {
+        if (parsedState.auditLogs && parsedState.auditLogs.length > 0) {
+          latestStateRef.current.auditLogs = parsedState.auditLogs;
+          setAuditLogs(parsedState.auditLogs);
+        }
+        if (parsedState.syncedFiles && parsedState.syncedFiles.length > 0) {
+          latestStateRef.current.syncedFiles = parsedState.syncedFiles;
+          setSyncedFiles(parsedState.syncedFiles);
+        }
+        if (parsedState.templateSettings) {
           setTemplateSettings((prev) => {
             const merged = migrateTemplateSettings({
               ...prev,
-              ...stateJson!.templateSettings,
-              appsScriptUrl: prev.appsScriptUrl || stateJson!.templateSettings.appsScriptUrl || '',
+              ...parsedState.templateSettings,
+              appsScriptUrl: prev.appsScriptUrl,
               googleSpreadsheetId: pulledSheetId || prev.googleSpreadsheetId,
               googleSheetUrl: pulledSheetUrl || prev.googleSheetUrl,
+              syncMode: prev.syncMode,
+              autoBackupEnabled: prev.autoBackupEnabled,
+              autoSyncOnTransaction: prev.autoSyncOnTransaction,
             });
             latestStateRef.current.templateSettings = merged;
             return merged;
           });
         }
-      }
 
-      // 2. Parse Sheet "Tài khoản" (authoritative for synced accounts, while NEVER dropping pending or server-relayed registrations)
-      hasPulledFromCloudRef.current = true;
-      const relayedUsers = await fetchRelayedUsersFromServer();
-      const localUsersSnapshot = latestStateRef.current.users;
-      const baseUsers =
-        stateJson?.users && stateJson.users.length > 0 ? stateJson.users : localUsersSnapshot;
-      const rawCloudUsers =
-        accountRows.length >= 2 ? parseUsersFromAccountSheet(accountRows, baseUsers) : baseUsers;
+        // Parse Sheet "Tài khoản" while NEVER dropping PENDING_APPROVAL or server-relayed registrations
+        hasPulledFromCloudRef.current = true;
+        const relayedUsers = await fetchRelayedUsersFromServer();
+        const localUsersSnapshot = latestStateRef.current.users;
+        const rawCloudUsers =
+          accountRows.length >= 2 ? parseUsersFromAccountSheet(accountRows, localUsersSnapshot) : localUsersSnapshot;
 
-      // Apply any fresher non-pending admin decisions from server relay if Sheets still says PENDING_APPROVAL
-      const cloudUsers = rawCloudUsers.map((cu) => {
-        const relayedMatch = relayedUsers.find(
-          (ru) =>
-            ru.id === cu.id ||
-            (cu.email && ru.email && ru.email.trim().toLowerCase() === cu.email.trim().toLowerCase())
+        const cloudUsers = rawCloudUsers.map((cu) => {
+          const relayedMatch = relayedUsers.find(
+            (ru) =>
+              ru.id === cu.id ||
+              (cu.email && ru.email && ru.email.trim().toLowerCase() === cu.email.trim().toLowerCase())
+          );
+          if (relayedMatch && cu.status === 'PENDING_APPROVAL' && relayedMatch.status !== 'PENDING_APPROVAL') {
+            return { ...cu, ...relayedMatch };
+          }
+          return cu;
+        });
+
+        const preservedMap = new Map<string, User>();
+        const seenEmails = new Set<string>(
+          cloudUsers.map((cu) => cu.email.trim().toLowerCase()).filter(Boolean)
         );
-        if (relayedMatch && cu.status === 'PENDING_APPROVAL' && relayedMatch.status !== 'PENDING_APPROVAL') {
-          return { ...cu, ...relayedMatch };
+        const seenIds = new Set<string>(cloudUsers.map((cu) => cu.id));
+
+        [...localUsersSnapshot, ...relayedUsers].forEach((candidate) => {
+          if (!candidate || !candidate.id || !candidate.email) return;
+          const normEmail = candidate.email.trim().toLowerCase();
+          if (seenIds.has(candidate.id) || seenEmails.has(normEmail) || preservedMap.has(candidate.id)) {
+            return;
+          }
+          const isFromRelay = relayedUsers.some((ru) => ru.id === candidate.id);
+          const shouldPreserve =
+            candidate.status === 'PENDING_APPROVAL' ||
+            pendingUnsyncedUserIdsRef.current.has(candidate.id) ||
+            isFromRelay;
+
+          if (shouldPreserve) {
+            preservedMap.set(candidate.id, {
+              id: candidate.id,
+              email: candidate.email,
+              password: candidate.password || '123',
+              fullName: candidate.fullName,
+              role: candidate.role,
+              status: candidate.status,
+              department: candidate.department,
+              phone: candidate.phone || '',
+              createdAt: candidate.createdAt || getTodayISODate(),
+              approvedAt: candidate.approvedAt,
+              approvedBy: candidate.approvedBy,
+            });
+            seenIds.add(candidate.id);
+            seenEmails.add(normEmail);
+          }
+        });
+
+        const mergedUsers = [...cloudUsers, ...Array.from(preservedMap.values())];
+
+        if (mergedUsers.length > 0) {
+          latestStateRef.current.users = mergedUsers;
+          setUsers(mergedUsers);
+          const cur = latestStateRef.current.currentUser;
+          const refreshedCur = mergedUsers.find((u) => u.id === cur?.id);
+          if (refreshedCur) {
+            latestStateRef.current.currentUser = refreshedCur;
+            setCurrentUser(refreshedCur);
+          }
         }
-        return cu;
-      });
 
-      // Preserve any PENDING_APPROVAL, unsynced, or server-relayed accounts missing from Google Sheets / Drive
-      const preservedMap = new Map<string, User>();
-      const seenEmails = new Set<string>(
-        cloudUsers.map((cu) => cu.email.trim().toLowerCase()).filter(Boolean)
-      );
-      const seenIds = new Set<string>(cloudUsers.map((cu) => cu.id));
+        setTemplateSettings((prev) => ({
+          ...prev,
+          googleSpreadsheetId: pulledSheetId || prev.googleSpreadsheetId,
+          googleSheetUrl: pulledSheetUrl || prev.googleSheetUrl,
+          lastBackupTime: timestamp,
+          lastBackupMessage: `Đồng bộ 10 tab Google Sheets (${mergedUsers.length} tài khoản)`,
+        }));
 
-      [...localUsersSnapshot, ...relayedUsers].forEach((candidate) => {
-        if (!candidate || !candidate.id || !candidate.email) return;
-        const normEmail = candidate.email.trim().toLowerCase();
-        if (seenIds.has(candidate.id) || seenEmails.has(normEmail) || preservedMap.has(candidate.id)) {
-          return;
-        }
-        const isFromRelay = relayedUsers.some((ru) => ru.id === candidate.id);
-        const shouldPreserve =
-          candidate.status === 'PENDING_APPROVAL' ||
-          pendingUnsyncedUserIdsRef.current.has(candidate.id) ||
-          isFromRelay;
-
-        if (shouldPreserve) {
-          preservedMap.set(candidate.id, {
-            id: candidate.id,
-            email: candidate.email,
-            password: candidate.password || '123',
-            fullName: candidate.fullName,
-            role: candidate.role,
-            status: candidate.status,
-            department: candidate.department,
-            phone: candidate.phone || '',
-            createdAt: candidate.createdAt || getTodayISODate(),
-            approvedAt: candidate.approvedAt,
-            approvedBy: candidate.approvedBy,
-          });
-          seenIds.add(candidate.id);
-          seenEmails.add(normEmail);
-        }
-      });
-
-      const mergedUsers = [...cloudUsers, ...Array.from(preservedMap.values())];
-
-      if (mergedUsers.length > 0) {
-        latestStateRef.current.users = mergedUsers;
-        setUsers(mergedUsers);
-        const cur = latestStateRef.current.currentUser;
-        const refreshedCur = mergedUsers.find((u) => u.id === cur?.id);
-        if (refreshedCur) {
-          latestStateRef.current.currentUser = refreshedCur;
-          setCurrentUser(refreshedCur);
-        }
-      }
-
-      setTemplateSettings((prev) => ({
-        ...prev,
-        googleSpreadsheetId: pulledSheetId || prev.googleSpreadsheetId,
-        googleSheetUrl: pulledSheetUrl || prev.googleSheetUrl,
-        lastBackupTime: timestamp,
-        lastBackupMessage: `Kéo đồng bộ 2 chiều từ Sheets & Drive (${mergedUsers.length} tài khoản${restoredFromDrive ? ', có JSON Drive' : ''})`,
-      }));
-
-      if (!silent) {
-        const snap = latestStateRef.current;
-        setBackupLogs((prev) => [
-          {
-            id: `bk-pull-${Date.now()}`,
-            timestamp,
-            action: 'KÉO_ĐỒNG_BỘ_HAI_CHIỀU',
-            status: 'SUCCESS',
-            recordCounts: {
-              receipts: snap.receipts.length,
-              issues: snap.issues.length,
-              medicines: snap.medicines.length,
-              beneficiaries: snap.beneficiaries.length,
+        if (!silent) {
+          const snap = latestStateRef.current;
+          setBackupLogs((prev) => [
+            {
+              id: `bk-pull-${Date.now()}`,
+              timestamp,
+              action: 'KÉO_ĐỒNG_BỘ_HAI_CHIỀU',
+              status: 'SUCCESS',
+              recordCounts: {
+                receipts: snap.receipts.length,
+                issues: snap.issues.length,
+                medicines: snap.medicines.length,
+                beneficiaries: snap.beneficiaries.length,
+              },
+              details: `Đã tải ngược toàn bộ dữ liệu từ 10 tab Google Sheets (${mergedUsers.length} tài khoản).`,
             },
-            details: `Đã tải ngược dữ liệu từ tab Tài khoản (${mergedUsers.length} user) và Drive JSON.`,
-          },
-          ...prev.slice(0, 49),
-        ]);
+            ...prev.slice(0, 49),
+          ]);
+        }
+
+        return {
+          success: true,
+          usersUpdated: mergedUsers.length,
+          restoredFromDrive: true,
+          timestamp,
+        };
+      } catch (err: any) {
+        const errMsg = err?.message || 'Lỗi khi đồng bộ ngược từ Google Sheets.';
+        if (!silent) setSyncSheetsError(errMsg);
+        return { success: false, error: errMsg };
+      } finally {
+        setIsPullingFromCloud(false);
       }
+    },
+    [fetchRelayedUsersFromServer]
+  );
 
-      return {
-        success: true,
-        usersUpdated: mergedUsers.length,
-        restoredFromDrive,
-        timestamp,
-      };
-    } catch (err: any) {
-      const errMsg = err?.message || 'Lỗi khi đồng bộ ngược từ Google Sheets & Drive.';
-      if (!silent) setSyncSheetsError(errMsg);
-      return { success: false, error: errMsg };
-    } finally {
-      setIsPullingFromCloud(false);
-    }
-  }, [fetchRelayedUsersFromServer]);
-
-  // On boot: discover shared bridge config from server, load any cross-session pending registrations, and pull Sheets/Drive
+  // On boot: discover shared bridge config from server, load any cross-session pending registrations, and pull 10 tabs from Google Sheets
   useEffect(() => {
     let active = true;
     const bootstrapSync = async () => {
       await fetchRelayedUsersFromServer();
-
-      try {
-        const cfgRes = await fetch('/api/cloud-bridge', { cache: 'no-store' });
-        const ct = cfgRes.headers.get('content-type') || '';
-        if (cfgRes.ok && ct.includes('application/json')) {
-          const cfgData = await cfgRes.json();
-          const srvCfg = cfgData?.config;
-          if (active && srvCfg && typeof srvCfg === 'object') {
-            const cur = latestStateRef.current.templateSettings;
-            const nextAppsScriptUrl = cur.appsScriptUrl || srvCfg.appsScriptUrl || '';
-            const nextSheetUrl = cur.googleSheetUrl || srvCfg.googleSheetUrl || '';
-            const nextSheetId = cur.googleSpreadsheetId || srvCfg.googleSpreadsheetId || '';
-            const nextDriveFolder = cur.googleDriveFolder || srvCfg.googleDriveFolder || 'QUAN_LY_THUOC_TRUNG_TAM/2026';
-
-            if (
-              nextAppsScriptUrl !== cur.appsScriptUrl ||
-              nextSheetUrl !== cur.googleSheetUrl ||
-              nextSheetId !== cur.googleSpreadsheetId
-            ) {
-              const updated = migrateTemplateSettings({
-                ...cur,
-                appsScriptUrl: nextAppsScriptUrl,
-                googleSheetUrl: nextSheetUrl,
-                googleSpreadsheetId: nextSheetId,
-                googleDriveFolder: nextDriveFolder,
-              });
-              latestStateRef.current.templateSettings = updated;
-              setTemplateSettings(updated);
-            }
-          }
-        }
-      } catch {
-        // Ignore if running statically
-      }
-
-      if (active && isValidAppsScriptUrl(latestStateRef.current.templateSettings.appsScriptUrl)) {
-        await pullFromSheetsAndDrive(true).catch(() => null);
+      const updatedCfg = await discoverSharedBridgeConfig();
+      if (active && isValidAppsScriptUrl(updatedCfg.appsScriptUrl)) {
+        await pullFromSheetsAndDrive(true, { seedIfEmpty: true }).catch(() => null);
       }
     };
 
@@ -1175,22 +1210,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return () => {
       active = false;
     };
-  }, [fetchRelayedUsersFromServer, pullFromSheetsAndDrive]);
+  }, [discoverSharedBridgeConfig, fetchRelayedUsersFromServer, pullFromSheetsAndDrive]);
 
   const autoPushedRelayIdsRef = useRef<Set<string>>(new Set());
+  const lastSheetsPullTsRef = useRef<number>(0);
 
-  // Live background sync while logged in so Admin sees new registrations from any tab/browser within seconds
+  // Live background sync while logged in so Admin sees new registrations from ANY browser/machine within seconds
   useEffect(() => {
     if (!isAuthenticated) return;
 
-    const syncRelayedRegistrations = async () => {
+    const syncRelayedAndSheets = async (allowSheetPull: boolean) => {
       const relayed = await fetchRelayedUsersFromServer();
-      if (!relayed || relayed.length === 0) return;
-
       const isAdmin = latestStateRef.current.currentUser?.role === 'ADMIN';
       const activeSettings = latestStateRef.current.templateSettings;
       const hasAppsScript = isValidAppsScriptUrl(activeSettings.appsScriptUrl);
-      const pendingSyncIds = relayed
+
+      // Push any relayed users that failed direct sheet sync when registrant registered
+      const pendingSyncIds = (relayed || [])
         .filter((ru) => ru.cloudSyncedToSheets === false && !autoPushedRelayIdsRef.current.has(ru.id))
         .map((ru) => ru.id);
 
@@ -1201,7 +1237,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             activeSettings.appsScriptUrl,
             latestStateRef.current.users,
             activeSettings,
-            hasPulledFromCloudRef.current ? buildSnapshotPayload() : undefined
+            false
           );
           if (accRes.success) {
             latestStateRef.current.users.forEach((u) => pendingUnsyncedUserIdsRef.current.delete(u.id));
@@ -1213,20 +1249,35 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             }).catch(() => null);
           }
         } catch {
-          // Will keep in local/server queue and retry on explicit refresh or next registration
+          // Will retry on manual refresh
         }
+      }
+
+      // Periodically pull from Google Sheets "Tài khoản" & system tabs so direct remote browser registrations appear automatically
+      const now = Date.now();
+      if (allowSheetPull && isAdmin && hasAppsScript && now - lastSheetsPullTsRef.current >= 10000) {
+        lastSheetsPullTsRef.current = now;
+        await pullFromSheetsAndDrive(true, { seedIfEmpty: false }).catch(() => null);
       }
     };
 
-    void syncRelayedRegistrations();
-    const interval = window.setInterval(() => {
+    void syncRelayedAndSheets(true);
+
+    const relayInterval = window.setInterval(() => {
       if (document.visibilityState === 'visible') {
-        void syncRelayedRegistrations();
+        void syncRelayedAndSheets(false);
       }
     }, 4000);
+
+    const sheetsInterval = window.setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        void syncRelayedAndSheets(true);
+      }
+    }, 12000);
+
     const onFocusOrVisible = () => {
       if (document.visibilityState === 'visible') {
-        void syncRelayedRegistrations();
+        void syncRelayedAndSheets(true);
       }
     };
 
@@ -1234,11 +1285,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     document.addEventListener('visibilitychange', onFocusOrVisible);
 
     return () => {
-      window.clearInterval(interval);
+      window.clearInterval(relayInterval);
+      window.clearInterval(sheetsInterval);
       window.removeEventListener('focus', onFocusOrVisible);
       document.removeEventListener('visibilitychange', onFocusOrVisible);
     };
-  }, [isAuthenticated, currentUser?.role, fetchRelayedUsersFromServer, buildSnapshotPayload, savePendingUnsyncedIds]);
+  }, [
+    isAuthenticated,
+    currentUser?.role,
+    fetchRelayedUsersFromServer,
+    pullFromSheetsAndDrive,
+    savePendingUnsyncedIds,
+  ]);
 
   const executeHybridSheetsSync = async (
     token: string | null,
@@ -1251,7 +1309,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const hasAppsScript = isValidAppsScriptUrl(activeSettings.appsScriptUrl);
     const isAdmin = snap.currentUser?.role === 'ADMIN';
 
-    // Non-admin accounts only auto-sync when Apps Script bridge is linked
     if (!isAdmin && !hasAppsScript) {
       return null;
     }
@@ -1262,9 +1319,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try {
       let result: GoogleSheetsSyncResult | null = null;
       let usedChannel: 'APPS_SCRIPT' | 'OAUTH' = 'OAUTH';
-      const stateSnapshot = buildSnapshotPayload();
 
-      // Channel 1: Google Apps Script Web App Bridge (4 sheets + Drive JSON snapshot)
+      // Channel 1: Google Apps Script Web App Bridge (All 10 Tabs in 1 Google Spreadsheet)
       if (syncMode === 'APPS_SCRIPT' || (syncMode === 'HYBRID' && hasAppsScript)) {
         if (!hasAppsScript) {
           throw new Error(
@@ -1273,17 +1329,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
 
         try {
-          const gasResult = await syncAllDataViaAppsScript(
-            activeSettings.appsScriptUrl,
-            snap.beneficiaries,
-            snap.receipts,
-            snap.issues,
-            snap.medicines,
-            snap.transactions,
-            activeSettings,
-            snap.users,
-            stateSnapshot
-          );
+          const gasResult = await syncAllDataViaAppsScript(activeSettings.appsScriptUrl, {
+            beneficiaries: snap.beneficiaries,
+            receipts: snap.receipts,
+            issues: snap.issues,
+            medicines: snap.medicines,
+            prescriptions: snap.prescriptions,
+            transactions: snap.transactions,
+            auditLogs: snap.auditLogs,
+            syncedFiles: snap.syncedFiles,
+            templateSettings: activeSettings,
+            users: snap.users,
+          });
+          if (typeof gasResult.scriptVersion === 'number' && gasResult.scriptVersion < APPS_SCRIPT_REQUIRED_VERSION) {
+            setAppsScriptOutdatedWarning(
+              `Google Apps Script đang chạy phiên bản cũ (v${gasResult.scriptVersion}). Admin vui lòng cập nhật Code.gs v3 mới để đồng bộ toàn bộ 10 tab & đăng ký tài khoản!`
+            );
+          } else {
+            setAppsScriptOutdatedWarning(null);
+          }
           usedChannel = 'APPS_SCRIPT';
           result = {
             ...gasResult,
@@ -1297,34 +1361,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
       }
 
-      // Channel 2: Direct Google OAuth API fallback or primary (Admin OAuth)
+      // Channel 2: Direct Google OAuth Sheets API v4 (All 10 Tabs)
       if (!result) {
         if (!token) {
           throw new Error(
-            'Chưa có phiên Google OAuth và chưa gắn URL Google Apps Script. Hãy cài đặt Apps Script hoặc đăng nhập Google OAuth để đồng bộ lên Sheets & Drive.'
+            'Chưa có phiên Google OAuth và chưa gắn URL Google Apps Script. Hãy cài đặt Apps Script hoặc đăng nhập Google OAuth để đồng bộ lên Google Sheets.'
           );
         }
-        result = await syncAllDataToGoogleSheets(
-          token,
-          snap.beneficiaries,
-          snap.receipts,
-          snap.issues,
-          snap.medicines,
-          snap.transactions,
-          activeSettings,
-          snap.users
-        );
-        // Also upsert full JSON state snapshot onto Google Drive
-        const driveStateRes = await upsertJsonFileInGoogleDrive(
-          token,
-          activeSettings.googleDriveFolder || 'QUAN_LY_THUOC_TRUNG_TAM/2026',
-          DRIVE_STATE_FILENAME,
-          JSON.stringify(stateSnapshot, null, 2)
-        );
-        if (driveStateRes.success) {
-          result.driveStateFileId = driveStateRes.fileId;
-          result.driveStateWebViewLink = driveStateRes.webViewLink;
-        }
+        result = await syncAllDataToGoogleSheets(token, {
+          beneficiaries: snap.beneficiaries,
+          receipts: snap.receipts,
+          issues: snap.issues,
+          medicines: snap.medicines,
+          prescriptions: snap.prescriptions,
+          transactions: snap.transactions,
+          auditLogs: snap.auditLogs,
+          syncedFiles: snap.syncedFiles,
+          templateSettings: activeSettings,
+          users: snap.users,
+        });
         usedChannel = 'OAUTH';
       }
 
@@ -1336,7 +1391,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ids: snap.users.map((u) => u.id) }),
       }).catch(() => null);
-      const channelLabel = usedChannel === 'APPS_SCRIPT' ? 'Apps Script (4 Sheet + Drive)' : 'Google OAuth (4 Sheet + Drive)';
+
+      const channelLabel =
+        usedChannel === 'APPS_SCRIPT' ? 'Apps Script (10 Tab Sheets)' : 'Google OAuth (10 Tab Sheets)';
 
       setTemplateSettings((prev) => ({
         ...prev,
@@ -1358,7 +1415,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           medicines: snap.medicines.length,
           beneficiaries: snap.beneficiaries.length,
         },
-        details: `Đồng bộ 04 Sheet + Drive JSON thành công qua ${channelLabel}: ${result.spreadsheetUrl}`,
+        details: `Đồng bộ toàn bộ 10 tab Google Sheets thành công qua ${channelLabel}: ${result.spreadsheetUrl}`,
       };
       setBackupLogs((prev) => [newLog, ...prev.slice(0, 49)]);
 
@@ -1388,18 +1445,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
+  executeHybridSheetsSyncRef.current = executeHybridSheetsSync;
+
   const testAppsScriptSync = async (url: string): Promise<AppsScriptPingResult> => {
     if (currentUser?.role !== 'ADMIN') {
       return { success: false, error: 'Chỉ Quản trị viên (ADMIN) mới có quyền kiểm tra kết nối.' };
     }
     const res = await testAppsScriptConnection(url);
     if (res.success && res.spreadsheetId) {
-      setTemplateSettings((prev) => ({
-        ...prev,
+      if (typeof res.scriptVersion === 'number' && res.scriptVersion < APPS_SCRIPT_REQUIRED_VERSION) {
+        setAppsScriptOutdatedWarning(
+          `Google Apps Script đang chạy phiên bản cũ (v${res.scriptVersion}). Admin vui lòng dán mã Code.gs v3 mới và Triển khai phiên bản mới!`
+        );
+      } else {
+        setAppsScriptOutdatedWarning(null);
+      }
+      const nextCfg = migrateTemplateSettings({
+        ...latestStateRef.current.templateSettings,
         appsScriptUrl: url.trim(),
-        googleSpreadsheetId: res.spreadsheetId || prev.googleSpreadsheetId,
-        googleSheetUrl: res.spreadsheetUrl || prev.googleSheetUrl,
-      }));
+        googleSpreadsheetId: res.spreadsheetId || latestStateRef.current.templateSettings.googleSpreadsheetId,
+        googleSheetUrl: res.spreadsheetUrl || latestStateRef.current.templateSettings.googleSheetUrl,
+      });
+      latestStateRef.current.templateSettings = nextCfg;
+      setTemplateSettings(nextCfg);
+
+      // Immediately pull from sheet or seed current initial data if the newly connected spreadsheet is empty!
+      void pullFromSheetsAndDrive(true, { seedIfEmpty: true });
     }
     return res;
   };
@@ -1427,7 +1498,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         ...prev,
         googleUserEmail: res.user?.email || prev.googleUserEmail,
       }));
-      await executeHybridSheetsSync(res.accessToken, 'Đồng bộ khởi tạo sau khi kết nối Google');
+      await executeHybridSheetsSync(res.accessToken, 'Đồng bộ khởi tạo 10 tab sau khi kết nối Google');
       return { success: true };
     } catch (err: any) {
       if (err?.code === 'auth/popup-closed-by-user' || err?.code === 'auth/cancelled-popup-request') {
@@ -1455,7 +1526,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const hasAppsScript = isValidAppsScriptUrl(activeSettings.appsScriptUrl);
     if (hasAppsScript && (activeSettings.syncMode === 'APPS_SCRIPT' || activeSettings.syncMode === 'HYBRID')) {
       const token = await getAccessToken();
-      return executeHybridSheetsSync(token, 'Đồng bộ toàn bộ 04 Sheet & Drive JSON');
+      return executeHybridSheetsSync(token, 'Đồng bộ toàn bộ 10 tab Google Sheets');
     }
 
     const token = await getAccessToken();
@@ -1464,12 +1535,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (!res.success) return null;
       const newToken = await getAccessToken();
       if (!newToken) return null;
-      return executeHybridSheetsSync(newToken, 'Đồng bộ toàn bộ 04 Sheet & Drive JSON');
+      return executeHybridSheetsSync(newToken, 'Đồng bộ toàn bộ 10 tab Google Sheets');
     }
-    return executeHybridSheetsSync(token, 'Đồng bộ toàn bộ 04 Sheet & Drive JSON');
+    return executeHybridSheetsSync(token, 'Đồng bộ toàn bộ 10 tab Google Sheets');
   };
 
-  // Trigger Automatic Bidirectional Backup to Google Sheets & Google Drive
+  // Trigger Automatic Bidirectional Backup to All 10 Tabs in Google Sheets
   const triggerAutoBackup = (actionDescription: string) => {
     const snap = latestStateRef.current;
     const timestamp = new Date().toLocaleTimeString('vi-VN') + ' ' + new Date().toLocaleDateString('vi-VN');
@@ -1496,7 +1567,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             medicines: snap.medicines.length,
             beneficiaries: snap.beneficiaries.length,
           },
-          details: `Đã ghi nhận (${actionDescription}). Gắn URL Apps Script để mọi tài khoản tự động đồng bộ 04 Sheet & Drive JSON.`,
+          details: `Đã ghi nhận (${actionDescription}). Gắn URL Apps Script v3 để tự động đồng bộ 10 tab Google Sheets.`,
         };
         setBackupLogs((prev) => [newLog, ...prev.slice(0, 49)]);
       }
@@ -1642,22 +1713,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       id: `med-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
       createdAt: getTodayISODate(),
     };
-    setMedicines((prev) => [newMed, ...prev]);
+    const nextMeds = [newMed, ...latestStateRef.current.medicines];
+    latestStateRef.current.medicines = nextMeds;
+    setMedicines(nextMeds);
     addAuditLog('TẠO_MỚI', 'THUỐC', newMed.code, `Tạo mới thuốc ${newMed.name} (${newMed.code})`);
+    triggerAutoBackup(`Thêm thuốc ${newMed.name}`);
     return newMed;
   };
 
   const updateMedicine = (id: string, updateData: Partial<Medicine>) => {
-    setMedicines((prev) =>
-      prev.map((m) => {
-        if (m.id === id) {
-          const updated = { ...m, ...updateData };
-          addAuditLog('CẬP_NHẬT', 'THUỐC', updated.code, `Cập nhật thông tin thuốc ${updated.name}`);
-          return updated;
-        }
-        return m;
-      })
-    );
+    let updatedName = '';
+    const nextMeds = latestStateRef.current.medicines.map((m) => {
+      if (m.id === id) {
+        const updated = { ...m, ...updateData };
+        updatedName = updated.name;
+        addAuditLog('CẬP_NHẬT', 'THUỐC', updated.code, `Cập nhật thông tin thuốc ${updated.name}`);
+        return updated;
+      }
+      return m;
+    });
+    latestStateRef.current.medicines = nextMeds;
+    setMedicines(nextMeds);
+    if (updatedName) triggerAutoBackup(`Cập nhật thuốc ${updatedName}`);
   };
 
   // Beneficiary CRUD
@@ -1667,22 +1744,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       id: `ben-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
       createdAt: getTodayISODate(),
     };
-    setBeneficiaries((prev) => [newBen, ...prev]);
+    const nextBens = [newBen, ...latestStateRef.current.beneficiaries];
+    latestStateRef.current.beneficiaries = nextBens;
+    setBeneficiaries(nextBens);
     addAuditLog('TẠO_MỚI', 'ĐỐI_TƯỢNG', newBen.code, `Thêm hồ sơ đối tượng ${newBen.fullName} (${newBen.code})`);
+    triggerAutoBackup(`Thêm đối tượng ${newBen.fullName}`);
     return newBen;
   };
 
   const updateBeneficiary = (id: string, updateData: Partial<Beneficiary>) => {
-    setBeneficiaries((prev) =>
-      prev.map((b) => {
-        if (b.id === id) {
-          const updated = { ...b, ...updateData };
-          addAuditLog('CẬP_NHẬT', 'ĐỐI_TƯỢNG', updated.code, `Cập nhật hồ sơ đối tượng ${updated.fullName}`);
-          return updated;
-        }
-        return b;
-      })
-    );
+    let updatedName = '';
+    const nextBens = latestStateRef.current.beneficiaries.map((b) => {
+      if (b.id === id) {
+        const updated = { ...b, ...updateData };
+        updatedName = updated.fullName;
+        addAuditLog('CẬP_NHẬT', 'ĐỐI_TƯỢNG', updated.code, `Cập nhật hồ sơ đối tượng ${updated.fullName}`);
+        return updated;
+      }
+      return b;
+    });
+    latestStateRef.current.beneficiaries = nextBens;
+    setBeneficiaries(nextBens);
+    if (updatedName) triggerAutoBackup(`Cập nhật đối tượng ${updatedName}`);
   };
 
   const refreshInFlightRef = useRef<Promise<{
@@ -1701,40 +1784,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     const task = (async () => {
-      if (!isValidAppsScriptUrl(latestStateRef.current.templateSettings.appsScriptUrl)) {
-        try {
-          const cfgRes = await fetch('/api/cloud-bridge', { cache: 'no-store' });
-          const ct = cfgRes.headers.get('content-type') || '';
-          if (cfgRes.ok && ct.includes('application/json')) {
-            const cfgData = await cfgRes.json();
-            if (cfgData?.config?.appsScriptUrl && isValidAppsScriptUrl(cfgData.config.appsScriptUrl)) {
-              const updated = migrateTemplateSettings({
-                ...latestStateRef.current.templateSettings,
-                ...cfgData.config,
-              });
-              latestStateRef.current.templateSettings = updated;
-              setTemplateSettings(updated);
-            }
-          }
-        } catch {
-          // Ignore on static hosting
-        }
-      }
-
+      const cfg = await discoverSharedBridgeConfig();
       const relayed = await fetchRelayedUsersFromServer();
-      const activeSettings = latestStateRef.current.templateSettings;
+      const activeSettings = isValidAppsScriptUrl(cfg.appsScriptUrl)
+        ? cfg
+        : latestStateRef.current.templateSettings;
       const hasAppsScript = isValidAppsScriptUrl(activeSettings.appsScriptUrl);
       let cloudSynced = false;
       let error: string | undefined;
 
       if (hasAppsScript) {
-        await pullFromSheetsAndDrive(true);
+        const pullRes = await pullFromSheetsAndDrive(true, { seedIfEmpty: false });
+        if (pullRes.success) {
+          cloudSynced = true;
+        } else if (pullRes.error) {
+          error = pullRes.error;
+        }
       }
 
       const hasUnsyncedRelayed =
         pendingUnsyncedUserIdsRef.current.size > 0 ||
         relayed.some((ru) => ru.cloudSyncedToSheets === false) ||
-        latestStateRef.current.users.some((u) => u.status === 'PENDING_APPROVAL' && relayed.some((ru) => ru.id === u.id && ru.cloudSyncedToSheets === false));
+        latestStateRef.current.users.some(
+          (u) =>
+            u.status === 'PENDING_APPROVAL' &&
+            relayed.some((ru) => ru.id === u.id && ru.cloudSyncedToSheets === false)
+        );
 
       if (hasUnsyncedRelayed) {
         const token = await getAccessToken();
@@ -1745,7 +1820,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               activeSettings.appsScriptUrl,
               latestStateRef.current.users,
               activeSettings,
-              hasPulledFromCloudRef.current ? buildSnapshotPayload() : undefined
+              false
             );
             if (accRes.success) {
               cloudSynced = true;
@@ -1782,7 +1857,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     } finally {
       refreshInFlightRef.current = null;
     }
-  }, [buildSnapshotPayload, fetchRelayedUsersFromServer, pullFromSheetsAndDrive, savePendingUnsyncedIds]);
+  }, [discoverSharedBridgeConfig, fetchRelayedUsersFromServer, pullFromSheetsAndDrive, savePendingUnsyncedIds]);
 
   // User Administration & RBAC Authentication
   const loginWithCredentials = (emailOrPhone: string, password?: string): { success: boolean; error?: string } => {
@@ -1864,31 +1939,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return { success: false, message: 'Mật khẩu phải có ít nhất 3 ký tự.' };
     }
 
-    // Discover latest shared Apps Script URL from server in case Admin configured it on another browser/tab
-    if (!isValidAppsScriptUrl(latestStateRef.current.templateSettings.appsScriptUrl)) {
-      try {
-        const cfgRes = await fetch('/api/cloud-bridge', { cache: 'no-store' });
-        const ct = cfgRes.headers.get('content-type') || '';
-        if (cfgRes.ok && ct.includes('application/json')) {
-          const cfgData = await cfgRes.json();
-          if (cfgData?.config?.appsScriptUrl && isValidAppsScriptUrl(cfgData.config.appsScriptUrl)) {
-            const updated = migrateTemplateSettings({
-              ...latestStateRef.current.templateSettings,
-              ...cfgData.config,
-            });
-            latestStateRef.current.templateSettings = updated;
-            setTemplateSettings(updated);
-          }
-        }
-      } catch {
-        // ignore on static hosts
-      }
-    }
-
+    // Discover shared Apps Script URL persisted on server so incognito / other browsers connect automatically
+    const discoveredSettings = await discoverSharedBridgeConfig();
     await fetchRelayedUsersFromServer();
 
-    const activeSettings = latestStateRef.current.templateSettings;
+    const activeSettings = isValidAppsScriptUrl(discoveredSettings.appsScriptUrl)
+      ? discoveredSettings
+      : latestStateRef.current.templateSettings;
     const hasAppsScript = isValidAppsScriptUrl(activeSettings.appsScriptUrl);
+
+    if (hasAppsScript && !hasPulledFromCloudRef.current) {
+      await pullFromSheetsAndDrive(true, { seedIfEmpty: false }).catch(() => null);
+    }
 
     const existing = latestStateRef.current.users.find(
       (u) =>
@@ -1913,13 +1975,59 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       approvedBy: data.autoApprove ? (currentUser?.fullName || 'Quản trị viên') : undefined,
     };
 
-    // Persist IMMEDIATELY to cross-browser server relay so Admin sees the registration right away from any tab/browser/device
+    const candidateUsersList = [...latestStateRef.current.users, newUser];
+    let cloudSynced = false;
+    let cloudErrMsg: string | null = null;
+    let syncResTimestamp = '';
+    let syncAccountCount = candidateUsersList.length;
+
+    // Step 1: When Apps Script URL is configured, atomically append directly to Google Sheets tab "Tài khoản" via LockService
+    if (hasAppsScript) {
+      try {
+        const regRes = await registerAccountViaAppsScript(
+          activeSettings.appsScriptUrl,
+          newUser,
+          activeSettings,
+          candidateUsersList
+        );
+        if (regRes?.success) {
+          cloudSynced = true;
+          syncResTimestamp = regRes.timestamp;
+          syncAccountCount = regRes.rowCounts.accounts;
+          if (typeof regRes.scriptVersion === 'number' && regRes.scriptVersion < APPS_SCRIPT_REQUIRED_VERSION) {
+            setAppsScriptOutdatedWarning(
+              `Google Apps Script đang chạy phiên bản cũ (v${regRes.scriptVersion}). Admin vui lòng cập nhật Code.gs v3 mới!`
+            );
+          } else {
+            setAppsScriptOutdatedWarning(null);
+          }
+          setTemplateSettings((prev) => ({
+            ...prev,
+            googleSpreadsheetId: regRes.spreadsheetId || prev.googleSpreadsheetId,
+            googleSheetUrl: regRes.spreadsheetUrl || prev.googleSheetUrl,
+            lastBackupTime: regRes.timestamp,
+            lastBackupMessage: `Đăng ký tài khoản ${newUser.fullName} -> tab Tài khoản (${regRes.rowCounts.accounts} tài khoản)`,
+          }));
+        }
+      } catch (err: any) {
+        if (isDuplicateAccountError(err)) {
+          return {
+            success: false,
+            message: err?.message || 'Email hoặc Số điện thoại này đã được đăng ký trên Google Sheets.',
+          };
+        }
+        cloudErrMsg = err?.message || 'Chưa ghi trực tiếp được lên Google Sheets (Apps Script).';
+        setSyncSheetsError(cloudErrMsg);
+      }
+    }
+
+    // Step 2: Persist to cross-browser relay cache for instant <4s visibility
     try {
       const relayRes = await fetch('/api/pending-registrations', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          user: { ...newUser, cloudSyncedToSheets: false },
+          user: { ...newUser, cloudSyncedToSheets: cloudSynced },
         }),
       });
       if (relayRes.status === 409) {
@@ -1933,7 +2041,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       // Static-only host fallback continues smoothly
     }
 
-    pendingUnsyncedUserIdsRef.current.add(newUser.id);
+    if (!cloudSynced) {
+      pendingUnsyncedUserIdsRef.current.add(newUser.id);
+    } else {
+      pendingUnsyncedUserIdsRef.current.delete(newUser.id);
+    }
     savePendingUnsyncedIds();
 
     const nextUsers = [...latestStateRef.current.users, newUser];
@@ -1953,64 +2065,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       logActor
     );
 
-    let cloudSynced = false;
-    let cloudErrMsg: string | null = null;
-
-    if (hasAppsScript) {
-      try {
-        // Pull latest cloud directory first if not pulled yet (newUser stays preserved via relay & pending status)
-        if (!hasPulledFromCloudRef.current) {
-          await pullFromSheetsAndDrive(true);
-        }
-        const usersToSync = latestStateRef.current.users.some((u) => u.id === newUser.id)
-          ? latestStateRef.current.users
-          : [...latestStateRef.current.users, newUser];
-
-        const syncRes = await syncAccountSheetViaAppsScript(
-          activeSettings.appsScriptUrl,
-          usersToSync,
-          activeSettings,
-          hasPulledFromCloudRef.current ? buildSnapshotPayload() : undefined
-        );
-        if (syncRes?.success) {
-          cloudSynced = true;
-          pendingUnsyncedUserIdsRef.current.delete(newUser.id);
-          savePendingUnsyncedIds();
-          fetch('/api/pending-registrations/mark-synced', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ ids: [newUser.id] }),
-          }).catch(() => null);
-
-          setTemplateSettings((prev) => ({
-            ...prev,
-            googleSpreadsheetId: syncRes.spreadsheetId || prev.googleSpreadsheetId,
-            googleSheetUrl: syncRes.spreadsheetUrl || prev.googleSheetUrl,
-            lastBackupTime: syncRes.timestamp,
-            lastBackupMessage: `Đăng ký tài khoản ${newUser.fullName} -> tab Tài khoản (${syncRes.rowCounts.accounts} tài khoản)`,
-          }));
-          setBackupLogs((prev) => [
-            {
-              id: `bk-reg-${Date.now()}`,
-              timestamp: syncRes.timestamp,
-              action: `Đăng ký tài khoản ${newUser.fullName}`,
-              status: 'SUCCESS',
-              recordCounts: {
-                receipts: latestStateRef.current.receipts.length,
-                issues: latestStateRef.current.issues.length,
-                medicines: latestStateRef.current.medicines.length,
-                beneficiaries: latestStateRef.current.beneficiaries.length,
-              },
-              details: `Đã cập nhật tab "Tài khoản" trên Google Sheets (${syncRes.rowCounts.accounts} dòng).`,
-            },
-            ...prev.slice(0, 49),
-          ]);
-        }
-      } catch (err: any) {
-        cloudErrMsg = err?.message || 'Chưa ghi được lên Google Sheets (Apps Script).';
-        setSyncSheetsError(cloudErrMsg);
-      }
-    } else if (isAuthenticated && currentUser?.role === 'ADMIN') {
+    if (cloudSynced && syncResTimestamp) {
+      setBackupLogs((prev) => [
+        {
+          id: `bk-reg-${Date.now()}`,
+          timestamp: syncResTimestamp,
+          action: `Đăng ký tài khoản ${newUser.fullName}`,
+          status: 'SUCCESS',
+          recordCounts: {
+            receipts: latestStateRef.current.receipts.length,
+            issues: latestStateRef.current.issues.length,
+            medicines: latestStateRef.current.medicines.length,
+            beneficiaries: latestStateRef.current.beneficiaries.length,
+          },
+          details: `Đã ghi nhận trực tiếp vào tab "Tài khoản" trên Google Sheets (${syncAccountCount} dòng).`,
+        },
+        ...prev.slice(0, 49),
+      ]);
+    } else if (!hasAppsScript && isAuthenticated && currentUser?.role === 'ADMIN') {
       const token = await getAccessToken();
       if (token) {
         const res = await executeHybridSheetsSync(token, `Đăng ký tài khoản ${newUser.fullName} lên tab Tài khoản`);
@@ -2034,7 +2106,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         ? 'Đăng ký thành công! Hồ sơ đã được đồng bộ lên sheet "Tài khoản" trên Google Sheets và chuyển Quản trị viên phê duyệt.'
         : cloudErrMsg
         ? `Đăng ký thành công và đã gửi về hàng chờ Quản trị viên! (Lưu ý đồng bộ Sheets: ${cloudErrMsg})`
-        : 'Đăng ký thành công! Hồ sơ đã được gửi tới Quản trị viên để phê duyệt (sẽ đồng bộ lên sheet "Tài khoản" khi Admin kết nối Google Sheets / Apps Script).',
+        : 'Đăng ký thành công! Hồ sơ đã được gửi tới Quản trị viên để phê duyệt (Admin cần lưu URL Apps Script hệ thống trong Đồng Bộ Sheets để mọi máy ghi thẳng lên Google Sheets).',
       user: newUser,
     };
   };
@@ -2079,15 +2151,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }).catch(() => null);
   };
 
-  const syncAccountDirectoryToCloud = (reason: string, updatedUsers: User[]) => {
+  const syncAccountDirectoryToCloud = (reason: string, updatedUsers: User[], mutatedUser?: User | null) => {
     const activeSettings = latestStateRef.current.templateSettings;
     if (isValidAppsScriptUrl(activeSettings.appsScriptUrl)) {
-      syncAccountSheetViaAppsScript(
-        activeSettings.appsScriptUrl,
-        updatedUsers,
-        activeSettings,
-        hasPulledFromCloudRef.current ? buildSnapshotPayload() : undefined
-      )
+      const syncPromise = mutatedUser
+        ? updateAccountViaAppsScript(
+            activeSettings.appsScriptUrl,
+            mutatedUser,
+            activeSettings,
+            updatedUsers
+          )
+        : syncAccountSheetViaAppsScript(
+            activeSettings.appsScriptUrl,
+            updatedUsers,
+            activeSettings,
+            true
+          );
+
+      syncPromise
         .then((res) => {
           if (res.success) {
             updatedUsers.forEach((u) => pendingUnsyncedUserIdsRef.current.delete(u.id));
@@ -2102,7 +2183,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         .catch(() => null);
       return;
     }
-    triggerAutoBackup(reason);
+
+    // OAuth-only Admin fallback (always push account updates even if autoBackupEnabled is toggled)
+    getAccessToken().then((token) => {
+      if (token && latestStateRef.current.currentUser?.role === 'ADMIN') {
+        void executeHybridSheetsSync(token, reason);
+      }
+    });
   };
 
   const approveUser = (userId: string, role: UserRole) => {
@@ -2126,7 +2213,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setUsers(nextUsers);
     broadcastUsersUpdate(nextUsers);
     if (approvedRecord) patchServerRelayedUser(approvedRecord);
-    syncAccountDirectoryToCloud('Phê duyệt tài khoản cán bộ', nextUsers);
+    syncAccountDirectoryToCloud('Phê duyệt tài khoản cán bộ', nextUsers, approvedRecord);
   };
 
   const rejectUser = (userId: string) => {
@@ -2144,7 +2231,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setUsers(nextUsers);
     broadcastUsersUpdate(nextUsers);
     if (rejectedRecord) patchServerRelayedUser(rejectedRecord);
-    syncAccountDirectoryToCloud('Từ chối tài khoản đăng ký', nextUsers);
+    syncAccountDirectoryToCloud('Từ chối tài khoản đăng ký', nextUsers, rejectedRecord);
   };
 
   const changeUserRole = (userId: string, role: UserRole) => {
@@ -2166,7 +2253,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setUsers(nextUsers);
     broadcastUsersUpdate(nextUsers);
     if (updatedRecord) patchServerRelayedUser(updatedRecord);
-    syncAccountDirectoryToCloud('Cập nhật vai trò tài khoản', nextUsers);
+    syncAccountDirectoryToCloud('Cập nhật vai trò tài khoản', nextUsers, updatedRecord);
   };
 
   const toggleUserStatus = (userId: string, status: UserStatus) => {
@@ -2184,7 +2271,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setUsers(nextUsers);
     broadcastUsersUpdate(nextUsers);
     if (updatedRecord) patchServerRelayedUser(updatedRecord);
-    syncAccountDirectoryToCloud('Thay đổi trạng thái khóa/mở tài khoản', nextUsers);
+    syncAccountDirectoryToCloud('Thay đổi trạng thái khóa/mở tài khoản', nextUsers, updatedRecord);
   };
 
   const updateUserAccount = (
@@ -2258,7 +2345,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       updatedUser.id,
       `Quản trị viên cập nhật toàn bộ thông tin cán bộ ${updatedUser.fullName} (${updatedUser.email}, vai trò ${updatedUser.role}, trạng thái ${updatedUser.status})${resetNote}`
     );
-    syncAccountDirectoryToCloud(`Cập nhật hồ sơ tài khoản ${updatedUser.fullName}`, nextUsers);
+    syncAccountDirectoryToCloud(`Cập nhật hồ sơ tài khoản ${updatedUser.fullName}`, nextUsers, updatedUser);
 
     return { success: true };
   };
@@ -2665,9 +2752,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       items,
     };
 
-    setPrescriptions((prev) => [newPresc, ...prev]);
+    const nextPrescs = [newPresc, ...latestStateRef.current.prescriptions];
+    latestStateRef.current.prescriptions = nextPrescs;
+    setPrescriptions(nextPrescs);
     const ben = beneficiaries.find((b) => b.id === newPresc.beneficiaryId);
     addAuditLog('KÊ_ĐƠN', 'ĐƠN_THUỐC', newPresc.code, `Lập đơn thuốc ${newPresc.code} cho đối tượng ${ben?.fullName}`);
+    triggerAutoBackup(`Lập đơn thuốc ${newPresc.code}`);
 
     return newPresc;
   };
@@ -2718,34 +2808,36 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     // Update prescription items dispensed quantity
-    setPrescriptions((prev) =>
-      prev.map((p) => {
-        if (p.id === prescriptionId) {
-          let allCompleted = true;
-          const updatedItems = p.items.map((pi) => {
-            const dispensedItem = itemsToDispense.find((d) => d.medicineId === pi.medicineId);
-            const addedQty = dispensedItem ? dispensedItem.quantity : 0;
-            const newDispensed = pi.dispensedQuantity + addedQty;
-            if (newDispensed < pi.prescribedQuantity) {
-              allCompleted = false;
-            }
-            return {
-              ...pi,
-              dispensedQuantity: newDispensed,
-            };
-          });
-
+    const nextPrescs: Prescription[] = latestStateRef.current.prescriptions.map((p) => {
+      if (p.id === prescriptionId) {
+        let allCompleted = true;
+        const updatedItems = p.items.map((pi) => {
+          const dispensedItem = itemsToDispense.find((d) => d.medicineId === pi.medicineId);
+          const addedQty = dispensedItem ? dispensedItem.quantity : 0;
+          const newDispensed = pi.dispensedQuantity + addedQty;
+          if (newDispensed < pi.prescribedQuantity) {
+            allCompleted = false;
+          }
           return {
-            ...p,
-            status: allCompleted ? 'COMPLETED' : 'DISPENSING',
-            items: updatedItems,
+            ...pi,
+            dispensedQuantity: newDispensed,
           };
-        }
-        return p;
-      })
-    );
+        });
+
+        const nextStatus: Prescription['status'] = allCompleted ? 'COMPLETED' : 'DISPENSING';
+        return {
+          ...p,
+          status: nextStatus,
+          items: updatedItems,
+        };
+      }
+      return p;
+    });
+    latestStateRef.current.prescriptions = nextPrescs;
+    setPrescriptions(nextPrescs);
 
     addAuditLog('CẤP_PHÁT', 'ĐƠN_THUỐC', presc.code, `Cấp phát thuốc đơn ${presc.code}, sinh phiếu xuất ${issueCode}`);
+    triggerAutoBackup(`Cấp phát đơn thuốc ${presc.code}`);
 
     return { success: true, issue: issueResult.issue };
   };
@@ -3078,6 +3170,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         isSyncingSheets,
         isPullingFromCloud,
         syncSheetsError,
+        appsScriptOutdatedWarning,
         lastSheetsSyncResult,
         loginWithGoogle,
         logoutFromGoogle,

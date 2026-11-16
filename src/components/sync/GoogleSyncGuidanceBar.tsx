@@ -46,6 +46,7 @@ export const GoogleSyncGuidanceBar: React.FC = () => {
     isSyncingSheets,
     isPullingFromCloud,
     syncSheetsError,
+    appsScriptOutdatedWarning,
     lastSheetsSyncResult,
   } = useApp();
 
@@ -85,17 +86,19 @@ export const GoogleSyncGuidanceBar: React.FC = () => {
     const result = await syncNowToGoogleSheets();
     if (result && result.success) {
       setSyncSuccessToast(
-        `Đồng bộ lên Google Sheets (04 Sheet) thành công! (${result.rowCounts.receipts} PNK, ${result.rowCounts.issues} PXK, ${result.rowCounts.reports} báo cáo, ${result.rowCounts.accounts || 0} tài khoản)`
+        `Đồng bộ lên Google Sheets (10 Tab) thành công! (${result.rowCounts.receipts} PNK, ${result.rowCounts.issues} PXK, ${result.rowCounts.reports} báo cáo, ${result.rowCounts.accounts || 0} tài khoản)`
       );
       setTimeout(() => setSyncSuccessToast(null), 5000);
     }
   };
 
   const handlePullFromCloud = async () => {
-    const res = await pullFromSheetsAndDrive(false);
+    const res = await pullFromSheetsAndDrive(false, { seedIfEmpty: true });
     if (res.success) {
       setSyncSuccessToast(
-        `Đã tải ngược dữ liệu 2 chiều (${res.usersUpdated || 0} tài khoản${res.restoredFromDrive ? ' & kho từ Drive' : ''}).`
+        res.seededToSheets
+          ? `Google Sheets mới chưa có dữ liệu — đã khởi tạo đồng bộ 10 tab (${res.usersUpdated || 0} tài khoản).`
+          : `Đã tải ngược dữ liệu 2 chiều từ 10 tab Google Sheets (${res.usersUpdated || 0} tài khoản).`
       );
       setTimeout(() => setSyncSuccessToast(null), 5000);
     }
@@ -278,17 +281,23 @@ export const GoogleSyncGuidanceBar: React.FC = () => {
         </AnimatePresence>
 
         <AnimatePresence>
-          {syncSheetsError && (
+          {(appsScriptOutdatedWarning || syncSheetsError) && (
             <motion.div
               key="sync-error"
               initial={{ opacity: 0, y: -6 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -6 }}
               transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
-              className="px-4 py-2 bg-rose-50 border-t border-rose-200 text-rose-800 text-xs font-medium flex items-center gap-2"
+              className={`px-4 py-2 border-t text-xs font-medium flex items-center gap-2 ${
+                syncSheetsError
+                  ? 'bg-rose-50 border-rose-200 text-rose-800'
+                  : 'bg-amber-50 border-amber-200 text-amber-900'
+              }`}
             >
-              <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
-              <span>{syncSheetsError}</span>
+              <AlertCircle
+                className={`w-4 h-4 shrink-0 ${syncSheetsError ? 'text-rose-600' : 'text-amber-700'}`}
+              />
+              <span>{syncSheetsError || appsScriptOutdatedWarning}</span>
             </motion.div>
           )}
         </AnimatePresence>
@@ -414,16 +423,16 @@ export const GoogleSyncGuidanceBar: React.FC = () => {
             <div className="space-y-4">
               <div className="p-4 rounded-xl bg-teal-50/60 border border-teal-200">
                 <h3 className="text-sm font-bold text-teal-900 mb-1.5">
-                  1. Cơ Chế Kết Hợp Apps Script Bridge + Google OAuth
+                  1. Cơ Chế Lưu Trữ Tập Trung 10 Tab Trên 01 Tệp Google Sheets
                 </h3>
                 <p className="text-teal-950/80 leading-relaxed">
-                  Khi Quản trị viên gắn URL Google Apps Script Web App trong phân hệ <strong>Đồng Bộ Sheets &amp; Drive</strong>, toàn bộ 04 trang tính (gồm tab Tài khoản) và snapshot JSON trên Google Drive sẽ tự động đồng bộ hai chiều mà không cần lưu dữ liệu vĩnh viễn tại trình duyệt.
+                  Khi Quản trị viên gắn URL Google Apps Script Web App v3 trong phân hệ <strong>Đồng Bộ Sheets &amp; Drive</strong>, URL này được chia sẻ cho toàn hệ thống để mọi trình duyệt và toàn bộ 10 tab (4 tab báo cáo/tài khoản + 6 tab danh mục &amp; chi tiết) tự động đồng bộ hai chiều trên 1 tệp Google Sheets duy nhất.
                 </p>
               </div>
 
               <div className="p-4 rounded-xl bg-white border border-slate-200">
                 <h3 className="text-sm font-bold text-slate-900 mb-2">
-                  2. Cấu Trúc 04 Sheet Chuẩn Hai Chiều
+                  2. Cấu Trúc 04 Tab Chính &amp; 06 Tab Dữ Liệu Hệ Thống
                 </h3>
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 text-2xs">
                   <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 space-y-1.5">
@@ -513,8 +522,8 @@ export const GoogleSyncGuidanceBar: React.FC = () => {
             <div>
               <div className="font-bold text-amber-900 mb-1">Xác nhận cập nhật dữ liệu Google Spreadsheet</div>
               <p className="leading-relaxed text-amber-800">
-                Hệ thống sẽ cập nhật đồng bộ 04 trang tính (<strong>Phiếu nhập</strong>, <strong>Phiếu xuất</strong>, <strong>Báo cáo</strong>, <strong>Tài khoản</strong>) cùng bản lưu JSON trên Google Drive qua kênh{' '}
-                <strong>{hasAppsScript ? 'Google Apps Script Bridge' : googleUser?.email || 'Google OAuth API'}</strong>.
+                Hệ thống sẽ cập nhật đồng bộ toàn bộ 10 tab trên 01 tệp Google Sheets duy nhất (<strong>Phiếu nhập</strong>, <strong>Phiếu xuất</strong>, <strong>Báo cáo</strong>, <strong>Tài khoản</strong> và 06 tab danh mục/chi tiết) qua kênh{' '}
+                <strong>{hasAppsScript ? 'Google Apps Script Bridge v3' : googleUser?.email || 'Google OAuth API'}</strong>.
               </p>
             </div>
           </div>

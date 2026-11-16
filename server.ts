@@ -5,11 +5,14 @@
 
 import express from 'express';
 import type { Request, Response } from 'express';
+import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+const BRIDGE_CONFIG_PATH = path.join(__dirname, '.cloud-bridge-config.json');
 
 interface SharedBridgeConfig {
   syncMode?: string;
@@ -45,14 +48,74 @@ const isValidGasUrl = (url?: string): boolean => {
 
 const normalizePhone = (phone?: string): string => (phone || '').replace(/[\s.-]/g, '').trim();
 
-const sharedBridgeConfig: SharedBridgeConfig = {
-  appsScriptUrl: (process.env.VITE_APPS_SCRIPT_URL || '').trim(),
-  googleDriveFolder: 'QUAN_LY_THUOC_TRUNG_TAM/2026',
-  syncMode: 'HYBRID',
-  autoBackupEnabled: true,
-  autoSyncOnTransaction: true,
+const loadPersistedBridgeConfig = (): SharedBridgeConfig => {
+  const envUrl = (process.env.VITE_APPS_SCRIPT_URL || process.env.APPS_SCRIPT_URL || '').trim();
+  const base: SharedBridgeConfig = {
+    appsScriptUrl: envUrl,
+    googleSheetUrl: '',
+    googleSpreadsheetId: '',
+    googleDriveFolder: 'QUAN_LY_THUOC_TRUNG_TAM/2026',
+    syncMode: 'HYBRID',
+    autoBackupEnabled: true,
+    autoSyncOnTransaction: true,
+  };
+
+  try {
+    if (fs.existsSync(BRIDGE_CONFIG_PATH)) {
+      const raw = fs.readFileSync(BRIDGE_CONFIG_PATH, 'utf-8');
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        return {
+          ...base,
+          syncMode: typeof parsed.syncMode === 'string' ? parsed.syncMode : base.syncMode,
+          appsScriptUrl:
+            typeof parsed.appsScriptUrl === 'string' && parsed.appsScriptUrl.trim()
+              ? parsed.appsScriptUrl.trim()
+              : base.appsScriptUrl,
+          googleSheetUrl: typeof parsed.googleSheetUrl === 'string' ? parsed.googleSheetUrl.trim() : '',
+          googleSpreadsheetId:
+            typeof parsed.googleSpreadsheetId === 'string' ? parsed.googleSpreadsheetId.trim() : '',
+          googleDriveFolder:
+            typeof parsed.googleDriveFolder === 'string' && parsed.googleDriveFolder.trim()
+              ? parsed.googleDriveFolder.trim()
+              : base.googleDriveFolder,
+          autoBackupEnabled:
+            typeof parsed.autoBackupEnabled === 'boolean' ? parsed.autoBackupEnabled : base.autoBackupEnabled,
+          autoSyncOnTransaction:
+            typeof parsed.autoSyncOnTransaction === 'boolean'
+              ? parsed.autoSyncOnTransaction
+              : base.autoSyncOnTransaction,
+          updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : undefined,
+        };
+      }
+    }
+  } catch (err) {
+    console.warn('Could not read persisted bridge config, using defaults:', err);
+  }
+
+  return base;
 };
 
+const savePersistedBridgeConfig = (cfg: SharedBridgeConfig) => {
+  try {
+    // Store ONLY non-sensitive connection endpoint settings (zero user/business data on server disk)
+    const cleanPayload: SharedBridgeConfig = {
+      syncMode: cfg.syncMode || 'HYBRID',
+      appsScriptUrl: (cfg.appsScriptUrl || '').trim(),
+      googleSheetUrl: (cfg.googleSheetUrl || '').trim(),
+      googleSpreadsheetId: (cfg.googleSpreadsheetId || '').trim(),
+      googleDriveFolder: (cfg.googleDriveFolder || 'QUAN_LY_THUOC_TRUNG_TAM/2026').trim(),
+      autoBackupEnabled: cfg.autoBackupEnabled !== false,
+      autoSyncOnTransaction: cfg.autoSyncOnTransaction !== false,
+      updatedAt: cfg.updatedAt || new Date().toISOString(),
+    };
+    fs.writeFileSync(BRIDGE_CONFIG_PATH, JSON.stringify(cleanPayload, null, 2), 'utf-8');
+  } catch (err) {
+    console.warn('Could not persist bridge config to disk:', err);
+  }
+};
+
+const sharedBridgeConfig: SharedBridgeConfig = loadPersistedBridgeConfig();
 const relayedUsersMap = new Map<string, RelayedUserRecord>();
 
 async function postAppsScriptServerSide(appsScriptUrl: string, payload: Record<string, unknown>) {
@@ -76,10 +139,18 @@ async function postAppsScriptServerSide(appsScriptUrl: string, payload: Record<s
   try {
     const parsed = JSON.parse(text);
     if (parsed && parsed.success === false) {
-      throw new Error(parsed.error || 'Apps Script trả về lỗi thực thi.');
+      const err: Error & { code?: string; duplicate?: boolean } = new Error(
+        parsed.error || 'Apps Script trả về lỗi thực thi.'
+      );
+      if (parsed.duplicate) err.duplicate = true;
+      if (parsed.code) err.code = String(parsed.code);
+      throw err;
     }
     return parsed;
   } catch (err: any) {
+    if (err?.duplicate || err?.code || (err?.message && !/JSON/i.test(err.message))) {
+      throw err;
+    }
     if (!response.ok) {
       throw new Error(`Lỗi kết nối Apps Script (${response.status}): ${text.slice(0, 200)}`);
     }
@@ -96,7 +167,7 @@ async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
 
-  app.use(express.json({ limit: '6mb' }));
+  app.use(express.json({ limit: '10mb' }));
 
   app.use('/api', (_req: Request, res: Response, next) => {
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
@@ -109,7 +180,7 @@ async function startServer() {
     res.status(200).send('OK');
   });
 
-  // 1. Shared Google Sheets / Apps Script Bridge Configuration
+  // 1. Shared Google Sheets / Apps Script Bridge Configuration (persisted pointer only)
   app.get('/api/cloud-bridge', (_req: Request, res: Response) => {
     res.json({
       success: true,
@@ -144,6 +215,8 @@ async function startServer() {
     }
     sharedBridgeConfig.updatedAt = new Date().toISOString();
 
+    savePersistedBridgeConfig(sharedBridgeConfig);
+
     res.json({
       success: true,
       config: sharedBridgeConfig,
@@ -165,14 +238,16 @@ async function startServer() {
       const data = await postAppsScriptServerSide(appsScriptUrl, payload);
       res.json({ success: true, data });
     } catch (err: any) {
-      res.status(502).json({
+      res.status(err?.duplicate ? 409 : 502).json({
         success: false,
+        duplicate: Boolean(err?.duplicate),
+        code: err?.code,
         error: err?.message || 'Không thể kết nối tới Google Apps Script Web App.',
       });
     }
   });
 
-  // 3. Cross-Browser / Cross-Tab Pending Registration Relay (until synced to Google Sheets "Tài khoản")
+  // 3. Cross-Browser / Cross-Tab Pending Registration Relay (real-time fallback & fast propagation)
   app.get('/api/pending-registrations', (_req: Request, res: Response) => {
     res.json({
       success: true,

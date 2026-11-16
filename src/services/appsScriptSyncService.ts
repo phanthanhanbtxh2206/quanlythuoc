@@ -141,19 +141,23 @@ function doPost(e) {
     var driveStateFileId = '';
     var driveStateWebViewLink = '';
     if (payload.stateJson) {
-      var driveFolder = payload.driveFolder || 'QUAN_LY_THUOC_TRUNG_TAM/2026';
-      var folder = getOrCreateNestedFolder(driveFolder);
-      var stateStr = typeof payload.stateJson === 'string' ? payload.stateJson : JSON.stringify(payload.stateJson);
-      var iter = folder.getFilesByName(STATE_FILE_NAME);
-      var stateFile;
-      if (iter.hasNext()) {
-        stateFile = iter.next();
-        stateFile.setContent(stateStr);
-      } else {
-        stateFile = folder.createFile(STATE_FILE_NAME, stateStr, 'application/json');
+      try {
+        var driveFolder = payload.driveFolder || 'QUAN_LY_THUOC_TRUNG_TAM/2026';
+        var folder = getOrCreateNestedFolder(driveFolder);
+        var stateStr = typeof payload.stateJson === 'string' ? payload.stateJson : JSON.stringify(payload.stateJson);
+        var iter = folder.getFilesByName(STATE_FILE_NAME);
+        var stateFile;
+        if (iter.hasNext()) {
+          stateFile = iter.next();
+          stateFile.setContent(stateStr);
+        } else {
+          stateFile = folder.createFile(STATE_FILE_NAME, stateStr, 'application/json');
+        }
+        driveStateFileId = stateFile.getId();
+        driveStateWebViewLink = stateFile.getUrl();
+      } catch (driveWriteErr) {
+        // Không làm gián đoạn việc ghi 4 trang tính Google Sheets nếu Drive chưa được cấp quyền
       }
-      driveStateFileId = stateFile.getId();
-      driveStateWebViewLink = stateFile.getUrl();
     }
 
     return jsonResponse({
@@ -293,7 +297,8 @@ export const isValidAppsScriptUrl = (url: string): boolean => {
 };
 
 /**
- * Send simple CORS POST (text/plain) to Google Apps Script Web App to avoid CORS preflight OPTIONS failure
+ * Send payload to Google Apps Script Web App via server-side proxy (no CORS/302 block),
+ * with automatic fallback to direct simple CORS POST when running on static-only hosts.
  */
 const postToAppsScript = async (appsScriptUrl: string, payload: Record<string, any>): Promise<any> => {
   const cleanUrl = appsScriptUrl.trim();
@@ -303,6 +308,37 @@ const postToAppsScript = async (appsScriptUrl: string, payload: Record<string, a
     );
   }
 
+  // 1. Prefer server-side proxy route (/api/apps-script-proxy) to eliminate browser 302/CORS issues
+  if (typeof window !== 'undefined' && window.location?.origin) {
+    try {
+      const proxyRes = await fetch('/api/apps-script-proxy', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          appsScriptUrl: cleanUrl,
+          payload,
+        }),
+      });
+
+      const contentType = proxyRes.headers.get('content-type') || '';
+      if (proxyRes.status !== 404 && contentType.includes('application/json')) {
+        const proxyJson = await proxyRes.json();
+        if (proxyRes.ok && proxyJson?.success) {
+          return proxyJson.data;
+        }
+        throw new Error(proxyJson?.error || `Lỗi kết nối Apps Script (${proxyRes.status}).`);
+      }
+    } catch (proxyErr: any) {
+      // Only fall through to direct fetch when proxy endpoint is unavailable (e.g. GitHub Pages static build)
+      if (proxyErr?.message && !/Failed to fetch|NetworkError|Unexpected token/i.test(proxyErr.message)) {
+        throw proxyErr;
+      }
+    }
+  }
+
+  // 2. Fallback: Direct simple CORS POST (text/plain)
   const res = await fetch(cleanUrl, {
     method: 'POST',
     headers: {
@@ -403,6 +439,49 @@ export const syncAllDataViaAppsScript = async (
       receipts: Math.max(0, receiptValues.length - 1),
       issues: Math.max(0, issueValues.length - 1),
       reports: Math.max(0, reportValues.length - 1),
+      accounts: Math.max(0, accountValues.length - 1),
+    },
+  };
+};
+
+/**
+ * Sync ONLY tab "Tài khoản" (plus optional Drive JSON state) via Apps Script
+ * so self-registration updates Google Sheets immediately without touching voucher/report sheets.
+ */
+export const syncAccountSheetViaAppsScript = async (
+  appsScriptUrl: string,
+  users: User[],
+  templateSettings: TemplateSettings,
+  stateSnapshot?: CloudStateSnapshot
+): Promise<AppsScriptSyncResult> => {
+  const { buildUsersAccountSheetRows } = await import('../utils/googleSheetsBackup');
+  const accountValues = jsonTo2DArray(buildUsersAccountSheetRows(users));
+
+  const data = await postToAppsScript(appsScriptUrl, {
+    action: 'SYNC_ALL',
+    agencyName: templateSettings.agencyName,
+    qhnsCode: templateSettings.qhnsCode,
+    driveFolder: templateSettings.googleDriveFolder || 'QUAN_LY_THUOC_TRUNG_TAM/2026',
+    sheets: {
+      'Tài khoản': accountValues,
+    },
+    stateJson: stateSnapshot || undefined,
+  });
+
+  const now = new Date();
+  const fallbackTs = `${now.toLocaleTimeString('vi-VN')} ${now.toLocaleDateString('vi-VN')}`;
+
+  return {
+    success: true,
+    spreadsheetId: data.spreadsheetId || templateSettings.googleSpreadsheetId || '',
+    spreadsheetUrl: data.spreadsheetUrl || templateSettings.googleSheetUrl || '',
+    timestamp: data.timestamp || fallbackTs,
+    driveStateFileId: data.driveStateFileId,
+    driveStateWebViewLink: data.driveStateWebViewLink,
+    rowCounts: data.rowCounts || {
+      receipts: 0,
+      issues: 0,
+      reports: 0,
       accounts: Math.max(0, accountValues.length - 1),
     },
   };

@@ -49,6 +49,7 @@ import {
 } from '../services/googleSheetsService';
 import {
   syncAllDataViaAppsScript,
+  syncAccountSheetViaAppsScript,
   pullAllDataViaAppsScript,
   uploadDocumentViaAppsScript,
   testAppsScriptConnection,
@@ -135,7 +136,8 @@ interface AppContextType {
     phone?: string;
     role: UserRole;
     autoApprove?: boolean;
-  }) => { success: boolean; message: string; user?: User };
+  }) => Promise<{ success: boolean; message: string; user?: User }>;
+  refreshUsersDirectory: () => Promise<{ usersCount: number; cloudSynced: boolean; error?: string }>;
   hasPermission: (permission: keyof RolePermissions) => boolean;
   canModifyReceipt: (receipt: StockReceipt, action: 'edit' | 'delete') => boolean;
   canModifyIssue: (issue: StockIssue, action: 'edit' | 'delete') => boolean;
@@ -235,7 +237,10 @@ const SESSION_STORAGE_KEYS = {
   LAST_ACTIVITY: 'btxh_sess_last_activity_v2',
   TEMPLATE_SETTINGS: 'btxh_sess_template_settings_v2',
   BACKUP_LOGS: 'btxh_sess_backup_logs_v2',
+  PENDING_USER_IDS: 'btxh_sess_pending_user_ids_v2',
 };
+
+const USERS_SYNC_CHANNEL = 'btxh_users_session_sync_v2';
 
 // Minimal connection bridge pointer so the app knows which Sheets/Apps Script to connect on boot
 const CLOUD_BRIDGE_CONFIG_KEY = 'btxh_cloud_bridge_cfg_v2';
@@ -279,10 +284,16 @@ const migrateTemplateSettings = (raw: Partial<TemplateSettings>): TemplateSettin
   return merged;
 };
 
+const normalizePhoneValue = (phone?: string) => (phone || '').replace(/[\s.-]/g, '').trim();
+
 const readSessionJson = <T,>(key: string, fallback: T): T => {
   try {
     const raw = sessionStorage.getItem(key);
-    return raw ? (JSON.parse(raw) as T) : fallback;
+    if (!raw) return fallback;
+    const parsed = JSON.parse(raw);
+    if (parsed === null || parsed === undefined) return fallback;
+    if (Array.isArray(fallback) && !Array.isArray(parsed)) return fallback;
+    return parsed as T;
   } catch {
     return fallback;
   }
@@ -301,10 +312,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, []);
 
   // Ephemeral working-session state initialization
-  const [users, setUsers] = useState<User[]>(() => readSessionJson(SESSION_STORAGE_KEYS.USERS, INITIAL_USERS));
-  const [currentUser, setCurrentUser] = useState<User>(() =>
-    readSessionJson(SESSION_STORAGE_KEYS.CURRENT_USER, INITIAL_USERS[2])
+  const [users, setUsers] = useState<User[]>(() => {
+    const loaded = readSessionJson<User[]>(SESSION_STORAGE_KEYS.USERS, INITIAL_USERS);
+    return Array.isArray(loaded) && loaded.length > 0 ? loaded : INITIAL_USERS;
+  });
+  const [currentUser, setCurrentUser] = useState<User>(() => {
+    const loaded = readSessionJson<User>(SESSION_STORAGE_KEYS.CURRENT_USER, INITIAL_USERS[2]);
+    return loaded && typeof loaded === 'object' && typeof loaded.id === 'string'
+      ? loaded
+      : INITIAL_USERS[2];
+  });
+  const pendingUnsyncedUserIdsRef = useRef<Set<string>>(
+    new Set(readSessionJson<string[]>(SESSION_STORAGE_KEYS.PENDING_USER_IDS, []))
   );
+  const hasPulledFromCloudRef = useRef<boolean>(false);
 
   // Requirement 1: Always require fresh login on first visit or when inactivity >= 60 minutes
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => {
@@ -478,6 +499,62 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     templateSettings,
   };
 
+  const savePendingUnsyncedIds = useCallback(() => {
+    try {
+      sessionStorage.setItem(
+        SESSION_STORAGE_KEYS.PENDING_USER_IDS,
+        JSON.stringify(Array.from(pendingUnsyncedUserIdsRef.current))
+      );
+    } catch {}
+  }, []);
+
+  const broadcastUsersUpdate = useCallback((nextUsers: User[]) => {
+    try {
+      if (typeof BroadcastChannel !== 'undefined') {
+        const ch = new BroadcastChannel(USERS_SYNC_CHANNEL);
+        ch.postMessage({ type: 'USERS_UPDATED', users: nextUsers });
+        ch.close();
+      }
+    } catch {
+      // ignore if BroadcastChannel unavailable
+    }
+  }, []);
+
+  // Listen for working-session user updates from sibling tabs in the same browser
+  useEffect(() => {
+    if (typeof BroadcastChannel === 'undefined') return;
+    let channel: BroadcastChannel | null = null;
+    try {
+      channel = new BroadcastChannel(USERS_SYNC_CHANNEL);
+      channel.onmessage = (event) => {
+        if (event?.data?.type === 'USERS_UPDATED' && Array.isArray(event.data.users)) {
+          const incoming: User[] = event.data.users;
+          setUsers((prev) => {
+            const byKey = new Map<string, User>();
+            prev.forEach((u) => byKey.set(u.id, u));
+            incoming.forEach((u) => {
+              const existingByEmail = Array.from(byKey.values()).find(
+                (ex) => ex.email.toLowerCase() === u.email.toLowerCase()
+              );
+              if (existingByEmail && existingByEmail.id !== u.id) return;
+              byKey.set(u.id, u);
+            });
+            const merged = Array.from(byKey.values());
+            latestStateRef.current.users = merged;
+            return merged;
+          });
+        }
+      };
+    } catch {
+      // ignore
+    }
+    return () => {
+      try {
+        channel?.close();
+      } catch {}
+    };
+  }, []);
+
   // Persist ONLY temporary working session state to sessionStorage
   useEffect(() => {
     try {
@@ -552,6 +629,96 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     } catch {}
   }, [syncedFiles]);
 
+  const lastPublishedBridgeJsonRef = useRef<string>('');
+
+  const mergeRelayedUsersList = useCallback((relayedUsers: (User & { cloudSyncedToSheets?: boolean; updatedAt?: string })[]) => {
+    if (!Array.isArray(relayedUsers) || relayedUsers.length === 0) return latestStateRef.current.users;
+    const currentList = latestStateRef.current.users;
+    const mergedMap = new Map<string, User>();
+    currentList.forEach((u) => mergedMap.set(u.id, u));
+
+    let changed = false;
+    relayedUsers.forEach((ru) => {
+      if (!ru || !ru.id || !ru.email) return;
+      if (ru.cloudSyncedToSheets === false) {
+        pendingUnsyncedUserIdsRef.current.add(ru.id);
+      }
+      const existingById = mergedMap.get(ru.id);
+      const existingByEmail = Array.from(mergedMap.values()).find(
+        (u) => u.email.trim().toLowerCase() === ru.email.trim().toLowerCase()
+      );
+      if (existingById) {
+        const hasDiff =
+          existingById.status !== ru.status ||
+          existingById.role !== ru.role ||
+          existingById.fullName !== ru.fullName ||
+          existingById.department !== ru.department ||
+          existingById.phone !== (ru.phone || '') ||
+          (ru.password && existingById.password !== ru.password);
+
+        const isStalePendingOverwrite =
+          ru.status === 'PENDING_APPROVAL' && existingById.status !== 'PENDING_APPROVAL';
+
+        if (hasDiff && !isStalePendingOverwrite) {
+          mergedMap.set(ru.id, {
+            ...existingById,
+            email: ru.email,
+            fullName: ru.fullName,
+            role: ru.role,
+            status: ru.status,
+            department: ru.department,
+            phone: ru.phone ?? existingById.phone,
+            password: ru.password || existingById.password,
+            approvedAt: ru.approvedAt ?? existingById.approvedAt,
+            approvedBy: ru.approvedBy ?? existingById.approvedBy,
+          });
+          changed = true;
+        }
+      } else if (!existingByEmail) {
+        const cleanUser: User = {
+          id: ru.id,
+          email: ru.email,
+          password: ru.password || '123',
+          fullName: ru.fullName,
+          role: ru.role,
+          status: ru.status,
+          department: ru.department,
+          phone: ru.phone || '',
+          createdAt: ru.createdAt || getTodayISODate(),
+          approvedAt: ru.approvedAt,
+          approvedBy: ru.approvedBy,
+        };
+        mergedMap.set(ru.id, cleanUser);
+        changed = true;
+      }
+    });
+
+    if (changed) {
+      savePendingUnsyncedIds();
+      const next = Array.from(mergedMap.values());
+      latestStateRef.current.users = next;
+      setUsers(next);
+      return next;
+    }
+    return currentList;
+  }, [savePendingUnsyncedIds]);
+
+  const fetchRelayedUsersFromServer = useCallback(async (): Promise<(User & { cloudSyncedToSheets?: boolean })[]> => {
+    try {
+      const res = await fetch('/api/pending-registrations');
+      const ct = res.headers.get('content-type') || '';
+      if (!res.ok || !ct.includes('application/json')) return [];
+      const data = await res.json();
+      if (data?.success && Array.isArray(data.users)) {
+        mergeRelayedUsersList(data.users);
+        return data.users;
+      }
+    } catch {
+      // Static hosting without /api/*
+    }
+    return [];
+  }, [mergeRelayedUsersList]);
+
   useEffect(() => {
     try {
       sessionStorage.setItem(SESSION_STORAGE_KEYS.TEMPLATE_SETTINGS, JSON.stringify(templateSettings));
@@ -566,6 +733,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         autoSyncOnTransaction: templateSettings.autoSyncOnTransaction,
       };
       localStorage.setItem(CLOUD_BRIDGE_CONFIG_KEY, JSON.stringify(cloudPointer));
+
+      // Publish bridge endpoint pointer to Express server so incognito / other browsers discover Apps Script URL
+      const pointerJson = JSON.stringify(cloudPointer);
+      if (
+        pointerJson !== lastPublishedBridgeJsonRef.current &&
+        (isValidAppsScriptUrl(cloudPointer.appsScriptUrl) || cloudPointer.googleSpreadsheetId)
+      ) {
+        lastPublishedBridgeJsonRef.current = pointerJson;
+        fetch('/api/cloud-bridge', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: pointerJson,
+        }).catch(() => null);
+      }
     } catch {}
   }, [templateSettings]);
 
@@ -829,10 +1010,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
       }
 
-      // 2. Parse Sheet "Tài khoản" (always authoritative for account status/role edits directly on Google Sheets)
-      const baseUsers = stateJson?.users && stateJson.users.length > 0 ? stateJson.users : latestStateRef.current.users;
-      const mergedUsers =
+      // 2. Parse Sheet "Tài khoản" (authoritative for cloud updates, while preserving locally pending registrations & server-relayed users)
+      hasPulledFromCloudRef.current = true;
+      const relayedUsers = await fetchRelayedUsersFromServer();
+      const localUsersSnapshot = latestStateRef.current.users;
+      const baseUsers =
+        stateJson?.users && stateJson.users.length > 0 ? stateJson.users : localUsersSnapshot;
+      const cloudUsers =
         accountRows.length >= 2 ? parseUsersFromAccountSheet(accountRows, baseUsers) : baseUsers;
+
+      // Preserve any locally created or server-relayed pending accounts not yet present in Google Sheets
+      const pendingUsersToPreserve = localUsersSnapshot.filter(
+        (lu) =>
+          (pendingUnsyncedUserIdsRef.current.has(lu.id) ||
+            relayedUsers.some((ru) => ru.id === lu.id && ru.cloudSyncedToSheets === false)) &&
+          !cloudUsers.some(
+            (cu) => cu.id === lu.id || cu.email.trim().toLowerCase() === lu.email.trim().toLowerCase()
+          )
+      );
+      const mergedUsers = [...cloudUsers, ...pendingUsersToPreserve];
 
       if (mergedUsers.length > 0) {
         latestStateRef.current.users = mergedUsers;
@@ -886,14 +1082,58 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     } finally {
       setIsPullingFromCloud(false);
     }
-  }, []);
+  }, [fetchRelayedUsersFromServer]);
 
-  // Auto-pull latest Sheets ("Tài khoản") & Drive JSON on initial boot when Apps Script URL is configured
+  // On boot: discover shared bridge config from server, load any cross-session pending registrations, and pull Sheets/Drive
   useEffect(() => {
-    if (isValidAppsScriptUrl(latestStateRef.current.templateSettings.appsScriptUrl)) {
-      pullFromSheetsAndDrive(true).catch(() => null);
-    }
-  }, [pullFromSheetsAndDrive]);
+    let active = true;
+    const bootstrapSync = async () => {
+      await fetchRelayedUsersFromServer();
+
+      try {
+        const cfgRes = await fetch('/api/cloud-bridge');
+        const ct = cfgRes.headers.get('content-type') || '';
+        if (cfgRes.ok && ct.includes('application/json')) {
+          const cfgData = await cfgRes.json();
+          const srvCfg = cfgData?.config;
+          if (active && srvCfg && typeof srvCfg === 'object') {
+            const cur = latestStateRef.current.templateSettings;
+            const nextAppsScriptUrl = cur.appsScriptUrl || srvCfg.appsScriptUrl || '';
+            const nextSheetUrl = cur.googleSheetUrl || srvCfg.googleSheetUrl || '';
+            const nextSheetId = cur.googleSpreadsheetId || srvCfg.googleSpreadsheetId || '';
+            const nextDriveFolder = cur.googleDriveFolder || srvCfg.googleDriveFolder || 'QUAN_LY_THUOC_TRUNG_TAM/2026';
+
+            if (
+              nextAppsScriptUrl !== cur.appsScriptUrl ||
+              nextSheetUrl !== cur.googleSheetUrl ||
+              nextSheetId !== cur.googleSpreadsheetId
+            ) {
+              const updated = migrateTemplateSettings({
+                ...cur,
+                appsScriptUrl: nextAppsScriptUrl,
+                googleSheetUrl: nextSheetUrl,
+                googleSpreadsheetId: nextSheetId,
+                googleDriveFolder: nextDriveFolder,
+              });
+              latestStateRef.current.templateSettings = updated;
+              setTemplateSettings(updated);
+            }
+          }
+        }
+      } catch {
+        // Ignore if running statically
+      }
+
+      if (active && isValidAppsScriptUrl(latestStateRef.current.templateSettings.appsScriptUrl)) {
+        await pullFromSheetsAndDrive(true).catch(() => null);
+      }
+    };
+
+    bootstrapSync();
+    return () => {
+      active = false;
+    };
+  }, [fetchRelayedUsersFromServer, pullFromSheetsAndDrive]);
 
   const executeHybridSheetsSync = async (
     token: string | null,
@@ -984,6 +1224,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
 
       setLastSheetsSyncResult(result);
+      snap.users.forEach((u) => pendingUnsyncedUserIdsRef.current.delete(u.id));
+      savePendingUnsyncedIds();
+      fetch('/api/pending-registrations/mark-synced', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: snap.users.map((u) => u.id) }),
+      }).catch(() => null);
       const channelLabel = usedChannel === 'APPS_SCRIPT' ? 'Apps Script (4 Sheet + Drive)' : 'Google OAuth (4 Sheet + Drive)';
 
       setTemplateSettings((prev) => ({
@@ -1180,12 +1427,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     triggerAutoBackup('Xuất tệp sao lưu Google Sheets 04 Sheet (.CSV)');
   };
 
-  const addAuditLog = (action: string, entity: string, entityId: string, details: string) => {
+  const addAuditLog = (
+    action: string,
+    entity: string,
+    entityId: string,
+    details: string,
+    actorOverride?: { id: string; fullName: string }
+  ) => {
+    const actor = actorOverride || latestStateRef.current.currentUser;
     const newLog: AuditLog = {
       id: `log-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
       timestamp: new Date().toISOString(),
-      userId: currentUser.id,
-      userName: currentUser.fullName,
+      userId: actor?.id || 'system',
+      userName: actor?.fullName || 'Hệ thống',
       action,
       entity,
       entityId,
@@ -1326,9 +1580,89 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
   };
 
+  const refreshUsersDirectory = useCallback(async (): Promise<{
+    usersCount: number;
+    cloudSynced: boolean;
+    error?: string;
+  }> => {
+    if (!isValidAppsScriptUrl(latestStateRef.current.templateSettings.appsScriptUrl)) {
+      try {
+        const cfgRes = await fetch('/api/cloud-bridge');
+        const ct = cfgRes.headers.get('content-type') || '';
+        if (cfgRes.ok && ct.includes('application/json')) {
+          const cfgData = await cfgRes.json();
+          if (cfgData?.config?.appsScriptUrl && isValidAppsScriptUrl(cfgData.config.appsScriptUrl)) {
+            const updated = migrateTemplateSettings({
+              ...latestStateRef.current.templateSettings,
+              ...cfgData.config,
+            });
+            latestStateRef.current.templateSettings = updated;
+            setTemplateSettings(updated);
+          }
+        }
+      } catch {
+        // Ignore on static hosting
+      }
+    }
+
+    const relayed = await fetchRelayedUsersFromServer();
+    const activeSettings = latestStateRef.current.templateSettings;
+    const hasAppsScript = isValidAppsScriptUrl(activeSettings.appsScriptUrl);
+    let cloudSynced = false;
+    let error: string | undefined;
+
+    if (hasAppsScript) {
+      await pullFromSheetsAndDrive(true);
+    }
+
+    const hasUnsyncedRelayed =
+      pendingUnsyncedUserIdsRef.current.size > 0 ||
+      relayed.some((ru) => ru.cloudSyncedToSheets === false);
+
+    if (hasUnsyncedRelayed) {
+      const token = await getAccessToken();
+      const isAdmin = latestStateRef.current.currentUser?.role === 'ADMIN';
+      if (hasAppsScript) {
+        try {
+          const accRes = await syncAccountSheetViaAppsScript(
+            activeSettings.appsScriptUrl,
+            latestStateRef.current.users,
+            activeSettings,
+            hasPulledFromCloudRef.current ? buildSnapshotPayload() : undefined
+          );
+          if (accRes.success) {
+            cloudSynced = true;
+            latestStateRef.current.users.forEach((u) => pendingUnsyncedUserIdsRef.current.delete(u.id));
+            savePendingUnsyncedIds();
+            fetch('/api/pending-registrations/mark-synced', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ ids: latestStateRef.current.users.map((u) => u.id) }),
+            }).catch(() => null);
+          }
+        } catch (err: any) {
+          error = err?.message;
+        }
+      } else if (isAdmin && token) {
+        const res = await executeHybridSheetsSync(
+          token,
+          'Đồng bộ tài khoản đăng ký mới lên tab Tài khoản'
+        );
+        cloudSynced = !!res?.success;
+      }
+    }
+
+    return {
+      usersCount: latestStateRef.current.users.length,
+      cloudSynced,
+      error,
+    };
+  }, [buildSnapshotPayload, fetchRelayedUsersFromServer, pullFromSheetsAndDrive, savePendingUnsyncedIds]);
+
   // User Administration & RBAC Authentication
   const loginWithCredentials = (emailOrPhone: string, password?: string): { success: boolean; error?: string } => {
     const cleanInput = emailOrPhone.trim().toLowerCase();
+    const cleanPhoneInput = normalizePhoneValue(emailOrPhone);
     const activeUsers = latestStateRef.current.users;
     const user = activeUsers.find(
       (u) =>
@@ -1336,7 +1670,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         u.email.toLowerCase() === cleanInput ||
         u.email.toLowerCase().replace('@btxhdanang.gov.vn', '@btxh.danang.gov.vn') === cleanInput ||
         u.email.toLowerCase().replace('@btxh.danang.gov.vn', '@btxhdanang.gov.vn') === cleanInput ||
-        (u.phone && u.phone.trim() === cleanInput) ||
+        (cleanPhoneInput && normalizePhoneValue(u.phone) === cleanPhoneInput) ||
         u.fullName.toLowerCase() === cleanInput
     );
 
@@ -1367,11 +1701,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setSessionNotice(null);
     lastActivityRef.current = Date.now();
     setIsAuthenticated(true);
-    addAuditLog('ĐĂNG_NHẬP', 'NGƯỜI_DÙNG', user.id, `Cán bộ ${user.fullName} (${user.role}) đăng nhập thành công`);
+    addAuditLog('ĐĂNG_NHẬP', 'NGƯỜI_DÙNG', user.id, `Cán bộ ${user.fullName} (${user.role}) đăng nhập thành công`, {
+      id: user.id,
+      fullName: user.fullName,
+    });
+
+    if (user.role === 'ADMIN') {
+      void refreshUsersDirectory();
+    }
+
     return { success: true };
   };
 
-  const registerNewAccount = (data: {
+  const registerNewAccount = async (data: {
     email: string;
     password?: string;
     fullName: string;
@@ -1379,47 +1721,192 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     phone?: string;
     role: UserRole;
     autoApprove?: boolean;
-  }): { success: boolean; message: string; user?: User } => {
+  }): Promise<{ success: boolean; message: string; user?: User }> => {
+    const cleanFullName = (data.fullName || '').trim();
+    const cleanEmail = (data.email || '').trim().toLowerCase();
+    const cleanPhone = (data.phone || '').trim();
+    const normalizedPhone = normalizePhoneValue(cleanPhone);
+    const cleanDepartment = (data.department || '').trim() || 'Phòng Y tế - Phục hồi chức năng';
+    const cleanPassword = (data.password || '').trim();
+
+    if (!cleanFullName) {
+      return { success: false, message: 'Vui lòng nhập Họ và tên cán bộ.' };
+    }
+    if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      return { success: false, message: 'Địa chỉ Email không đúng định dạng.' };
+    }
+    if (cleanPassword && cleanPassword.length < 3) {
+      return { success: false, message: 'Mật khẩu phải có ít nhất 3 ký tự.' };
+    }
+
+    // Discover latest shared Apps Script URL from server in case Admin configured it on another browser/tab
+    if (!isValidAppsScriptUrl(latestStateRef.current.templateSettings.appsScriptUrl)) {
+      try {
+        const cfgRes = await fetch('/api/cloud-bridge');
+        const ct = cfgRes.headers.get('content-type') || '';
+        if (cfgRes.ok && ct.includes('application/json')) {
+          const cfgData = await cfgRes.json();
+          if (cfgData?.config?.appsScriptUrl && isValidAppsScriptUrl(cfgData.config.appsScriptUrl)) {
+            const updated = migrateTemplateSettings({
+              ...latestStateRef.current.templateSettings,
+              ...cfgData.config,
+            });
+            latestStateRef.current.templateSettings = updated;
+            setTemplateSettings(updated);
+          }
+        }
+      } catch {
+        // ignore on static hosts
+      }
+    }
+
+    await fetchRelayedUsersFromServer();
+
+    const activeSettings = latestStateRef.current.templateSettings;
+    const hasAppsScript = isValidAppsScriptUrl(activeSettings.appsScriptUrl);
+
+    // Pull latest cloud state first so duplicate checks & user directory stay in sync without overwriting voucher sheets
+    if (hasAppsScript && !hasPulledFromCloudRef.current) {
+      await pullFromSheetsAndDrive(true);
+    }
+
     const existing = latestStateRef.current.users.find(
       (u) =>
-        u.email.toLowerCase() === data.email.trim().toLowerCase() ||
-        (data.phone && u.phone && u.phone.trim() === data.phone.trim())
+        u.email.trim().toLowerCase() === cleanEmail ||
+        (normalizedPhone.length > 0 && normalizePhoneValue(u.phone) === normalizedPhone)
     );
     if (existing) {
       return { success: false, message: 'Email hoặc Số điện thoại này đã được đăng ký trong hệ thống.' };
     }
 
     const newUser: User = {
-      id: `usr-${Date.now()}`,
+      id: `usr-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       email: data.email.trim(),
-      password: data.password || '123',
-      fullName: data.fullName.trim(),
+      password: cleanPassword || '123',
+      fullName: cleanFullName,
       role: data.role,
       status: data.autoApprove ? 'ACTIVE' : 'PENDING_APPROVAL',
-      department: data.department.trim(),
-      phone: data.phone?.trim() || '',
+      department: cleanDepartment,
+      phone: cleanPhone,
       createdAt: getTodayISODate(),
       approvedAt: data.autoApprove ? getTodayISODate() : undefined,
-      approvedBy: data.autoApprove ? 'Quản trị viên' : undefined,
+      approvedBy: data.autoApprove ? (currentUser?.fullName || 'Quản trị viên') : undefined,
     };
+
+    // Persist to cross-browser server relay so Admin sees the registration from any tab/browser/device
+    try {
+      const relayRes = await fetch('/api/pending-registrations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          user: { ...newUser, cloudSyncedToSheets: false },
+        }),
+      });
+      if (relayRes.status === 409) {
+        const errJson = await relayRes.json().catch(() => null);
+        return {
+          success: false,
+          message: errJson?.error || 'Email hoặc Số điện thoại này đã được đăng ký trong hệ thống.',
+        };
+      }
+    } catch {
+      // Static-only host fallback continues smoothly
+    }
+
+    pendingUnsyncedUserIdsRef.current.add(newUser.id);
+    savePendingUnsyncedIds();
 
     const nextUsers = [...latestStateRef.current.users, newUser];
     latestStateRef.current.users = nextUsers;
     setUsers(nextUsers);
+    broadcastUsersUpdate(nextUsers);
+
+    const logActor = isAuthenticated
+      ? { id: currentUser?.id || 'admin', fullName: currentUser?.fullName || 'Quản trị viên' }
+      : { id: newUser.id, fullName: newUser.fullName };
 
     addAuditLog(
       'ĐĂNG_KÝ',
       'NGƯỜI_DÙNG',
       newUser.id,
-      `Tài khoản mới ${newUser.fullName} (${newUser.role}) đăng ký ${data.autoApprove ? 'và được kích hoạt' : 'chờ duyệt'}`
+      `Tài khoản mới ${newUser.fullName} (${newUser.role}) đăng ký ${data.autoApprove ? 'và được kích hoạt' : 'chờ duyệt'}`,
+      logActor
     );
-    triggerAutoBackup(`Đăng ký tài khoản ${newUser.fullName} lên tab Tài khoản`);
+
+    let cloudSynced = false;
+    let cloudErrMsg: string | null = null;
+
+    if (hasAppsScript) {
+      try {
+        const syncRes = await syncAccountSheetViaAppsScript(
+          activeSettings.appsScriptUrl,
+          nextUsers,
+          activeSettings,
+          hasPulledFromCloudRef.current ? buildSnapshotPayload() : undefined
+        );
+        if (syncRes?.success) {
+          cloudSynced = true;
+          pendingUnsyncedUserIdsRef.current.delete(newUser.id);
+          savePendingUnsyncedIds();
+          fetch('/api/pending-registrations/mark-synced', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ids: [newUser.id] }),
+          }).catch(() => null);
+
+          setTemplateSettings((prev) => ({
+            ...prev,
+            googleSpreadsheetId: syncRes.spreadsheetId || prev.googleSpreadsheetId,
+            googleSheetUrl: syncRes.spreadsheetUrl || prev.googleSheetUrl,
+            lastBackupTime: syncRes.timestamp,
+            lastBackupMessage: `Đăng ký tài khoản ${newUser.fullName} -> tab Tài khoản (${syncRes.rowCounts.accounts} tài khoản)`,
+          }));
+          setBackupLogs((prev) => [
+            {
+              id: `bk-reg-${Date.now()}`,
+              timestamp: syncRes.timestamp,
+              action: `Đăng ký tài khoản ${newUser.fullName}`,
+              status: 'SUCCESS',
+              recordCounts: {
+                receipts: latestStateRef.current.receipts.length,
+                issues: latestStateRef.current.issues.length,
+                medicines: latestStateRef.current.medicines.length,
+                beneficiaries: latestStateRef.current.beneficiaries.length,
+              },
+              details: `Đã cập nhật tab "Tài khoản" trên Google Sheets (${syncRes.rowCounts.accounts} dòng).`,
+            },
+            ...prev.slice(0, 49),
+          ]);
+        }
+      } catch (err: any) {
+        cloudErrMsg = err?.message || 'Chưa ghi được lên Google Sheets (Apps Script).';
+        setSyncSheetsError(cloudErrMsg);
+      }
+    } else if (isAuthenticated && currentUser?.role === 'ADMIN') {
+      const token = await getAccessToken();
+      if (token) {
+        const res = await executeHybridSheetsSync(token, `Đăng ký tài khoản ${newUser.fullName} lên tab Tài khoản`);
+        cloudSynced = !!res?.success;
+      }
+    }
+
+    if (data.autoApprove) {
+      return {
+        success: true,
+        message: cloudSynced
+          ? 'Đăng ký thành công và đã đồng bộ lên tab Tài khoản trên Google Sheets!'
+          : 'Đăng ký thành công! Tài khoản đã sẵn sàng đăng nhập.',
+        user: newUser,
+      };
+    }
 
     return {
       success: true,
-      message: data.autoApprove
-        ? 'Đăng ký thành công! Tài khoản đã sẵn sàng đăng nhập.'
-        : 'Đăng ký thành công! Hồ sơ đã được ghi nhận và chuyển tới Quản trị viên phê duyệt.',
+      message: cloudSynced
+        ? 'Đăng ký thành công! Hồ sơ đã được đồng bộ lên sheet "Tài khoản" trên Google Sheets và chuyển Quản trị viên phê duyệt.'
+        : cloudErrMsg
+        ? `Đăng ký thành công và đã gửi về hàng chờ Quản trị viên! (Lưu ý đồng bộ Sheets: ${cloudErrMsg})`
+        : 'Đăng ký thành công! Hồ sơ đã được gửi tới Quản trị viên để phê duyệt (sẽ đồng bộ lên sheet "Tài khoản" khi Admin kết nối Google Sheets / Apps Script).',
       user: newUser,
     };
   };
@@ -1446,7 +1933,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const registerUser = (email: string, fullName: string, department: string, phone: string, requestedRole: UserRole) => {
-    registerNewAccount({
+    void registerNewAccount({
       email,
       fullName,
       department,
@@ -1456,7 +1943,42 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
   };
 
+  const patchServerRelayedUser = (user: User) => {
+    fetch(`/api/pending-registrations/${encodeURIComponent(user.id)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(user),
+    }).catch(() => null);
+  };
+
+  const syncAccountDirectoryToCloud = (reason: string, updatedUsers: User[]) => {
+    const activeSettings = latestStateRef.current.templateSettings;
+    if (isValidAppsScriptUrl(activeSettings.appsScriptUrl)) {
+      syncAccountSheetViaAppsScript(
+        activeSettings.appsScriptUrl,
+        updatedUsers,
+        activeSettings,
+        hasPulledFromCloudRef.current ? buildSnapshotPayload() : undefined
+      )
+        .then((res) => {
+          if (res.success) {
+            updatedUsers.forEach((u) => pendingUnsyncedUserIdsRef.current.delete(u.id));
+            savePendingUnsyncedIds();
+            fetch('/api/pending-registrations/mark-synced', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ ids: updatedUsers.map((u) => u.id) }),
+            }).catch(() => null);
+          }
+        })
+        .catch(() => null);
+      return;
+    }
+    triggerAutoBackup(reason);
+  };
+
   const approveUser = (userId: string, role: UserRole) => {
+    let approvedRecord: User | null = null;
     const nextUsers = latestStateRef.current.users.map((u) => {
       if (u.id === userId) {
         const updated: User = {
@@ -1466,6 +1988,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           approvedAt: getTodayISODate(),
           approvedBy: currentUser.fullName,
         };
+        approvedRecord = updated;
         addAuditLog('PHÊ_DUYỆT', 'NGƯỜI_DÙNG', u.id, `Phê duyệt tài khoản ${u.fullName} với vai trò ${role}`);
         return updated;
       }
@@ -1473,13 +1996,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
     latestStateRef.current.users = nextUsers;
     setUsers(nextUsers);
-    triggerAutoBackup('Phê duyệt tài khoản cán bộ');
+    broadcastUsersUpdate(nextUsers);
+    if (approvedRecord) patchServerRelayedUser(approvedRecord);
+    syncAccountDirectoryToCloud('Phê duyệt tài khoản cán bộ', nextUsers);
   };
 
   const rejectUser = (userId: string) => {
+    let rejectedRecord: User | null = null;
     const nextUsers = latestStateRef.current.users.map((u) => {
       if (u.id === userId) {
         const updated: User = { ...u, status: 'REJECTED' };
+        rejectedRecord = updated;
         addAuditLog('TỪ_CHỐI', 'NGƯỜI_DÙNG', u.id, `Từ chối cấp quyền tài khoản ${u.fullName}`);
         return updated;
       }
@@ -1487,13 +2014,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
     latestStateRef.current.users = nextUsers;
     setUsers(nextUsers);
-    triggerAutoBackup('Từ chối tài khoản đăng ký');
+    broadcastUsersUpdate(nextUsers);
+    if (rejectedRecord) patchServerRelayedUser(rejectedRecord);
+    syncAccountDirectoryToCloud('Từ chối tài khoản đăng ký', nextUsers);
   };
 
   const changeUserRole = (userId: string, role: UserRole) => {
+    let updatedRecord: User | null = null;
     const nextUsers = latestStateRef.current.users.map((u) => {
       if (u.id === userId) {
         const updated: User = { ...u, role };
+        updatedRecord = updated;
         addAuditLog('PHÂN_QUYỀN', 'NGƯỜI_DÙNG', u.id, `Thay đổi vai trò của cán bộ ${u.fullName} thành ${role}`);
         if (currentUser.id === userId) {
           latestStateRef.current.currentUser = updated;
@@ -1505,13 +2036,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
     latestStateRef.current.users = nextUsers;
     setUsers(nextUsers);
-    triggerAutoBackup('Cập nhật vai trò tài khoản');
+    broadcastUsersUpdate(nextUsers);
+    if (updatedRecord) patchServerRelayedUser(updatedRecord);
+    syncAccountDirectoryToCloud('Cập nhật vai trò tài khoản', nextUsers);
   };
 
   const toggleUserStatus = (userId: string, status: UserStatus) => {
+    let updatedRecord: User | null = null;
     const nextUsers = latestStateRef.current.users.map((u) => {
       if (u.id === userId) {
         const updated: User = { ...u, status };
+        updatedRecord = updated;
         addAuditLog('TRẠNG_THÁI', 'NGƯỜI_DÙNG', u.id, `Đổi trạng thái tài khoản ${u.fullName} sang ${status}`);
         return updated;
       }
@@ -1519,7 +2054,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
     latestStateRef.current.users = nextUsers;
     setUsers(nextUsers);
-    triggerAutoBackup('Thay đổi trạng thái khóa/mở tài khoản');
+    broadcastUsersUpdate(nextUsers);
+    if (updatedRecord) patchServerRelayedUser(updatedRecord);
+    syncAccountDirectoryToCloud('Thay đổi trạng thái khóa/mở tài khoản', nextUsers);
   };
 
   const updateUserAccount = (
@@ -1578,6 +2115,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const nextUsers = latestStateRef.current.users.map((u) => (u.id === userId ? updatedUser : u));
     latestStateRef.current.users = nextUsers;
     setUsers(nextUsers);
+    broadcastUsersUpdate(nextUsers);
+    patchServerRelayedUser(updatedUser);
 
     if (currentUser.id === userId) {
       latestStateRef.current.currentUser = updatedUser;
@@ -1591,7 +2130,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       updatedUser.id,
       `Quản trị viên cập nhật toàn bộ thông tin cán bộ ${updatedUser.fullName} (${updatedUser.email}, vai trò ${updatedUser.role}, trạng thái ${updatedUser.status})${resetNote}`
     );
-    triggerAutoBackup(`Cập nhật hồ sơ tài khoản ${updatedUser.fullName}`);
+    syncAccountDirectoryToCloud(`Cập nhật hồ sơ tài khoản ${updatedUser.fullName}`, nextUsers);
 
     return { success: true };
   };
@@ -2430,6 +2969,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         loginWithCredentials,
         logoutApp,
         registerNewAccount,
+        refreshUsersDirectory,
         hasPermission,
         canModifyReceipt,
         canModifyIssue,

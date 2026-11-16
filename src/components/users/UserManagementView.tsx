@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import { User, UserRole, UserStatus, ROLE_PERMISSIONS, REGISTRATION_DEPARTMENTS } from '../../types';
+import { isValidAppsScriptUrl } from '../../services/appsScriptSyncService';
 import {
   ShieldCheck,
   UserPlus,
@@ -16,6 +17,7 @@ import {
   EyeOff,
   CheckCircle2,
   Search,
+  RefreshCw,
 } from 'lucide-react';
 import { Modal } from '../common/Modal';
 import { formatDate } from '../../utils/formatters';
@@ -26,11 +28,15 @@ export const UserManagementView: React.FC = () => {
     currentUser,
     hasPermission,
     registerNewAccount,
+    refreshUsersDirectory,
     approveUser,
     rejectUser,
     changeUserRole,
     toggleUserStatus,
     updateUserAccount,
+    templateSettings,
+    isPullingFromCloud,
+    isGoogleAuthenticated,
   } = useApp();
 
   const [activeTab, setActiveTab] = useState<'users' | 'matrix'>('users');
@@ -47,6 +53,7 @@ export const UserManagementView: React.FC = () => {
   const [requestedRole, setRequestedRole] = useState<UserRole>('DOCTOR');
   const [autoActivate, setAutoActivate] = useState(true);
   const [createError, setCreateError] = useState<string | null>(null);
+  const [isCreatingUser, setIsCreatingUser] = useState(false);
 
   // Full Edit User Modal State (Admin Only)
   const [editingUser, setEditingUser] = useState<User | null>(null);
@@ -85,11 +92,37 @@ export const UserManagementView: React.FC = () => {
     REJECTED: { label: 'Đã từ chối', style: 'text-rose-700 bg-rose-50 border-rose-200' },
   };
 
+  const [isRefreshingUsers, setIsRefreshingUsers] = useState(false);
+
   const isAdmin = currentUser.role === 'ADMIN' && hasPermission('canManageUsers');
+  const hasCloudSheetConnection =
+    isValidAppsScriptUrl(templateSettings.appsScriptUrl) || isGoogleAuthenticated;
 
   const showToast = (type: 'success' | 'error', text: string) => {
     setFeedbackToast({ type, text });
     setTimeout(() => setFeedbackToast(null), 4000);
+  };
+
+  useEffect(() => {
+    void refreshUsersDirectory();
+  }, [refreshUsersDirectory]);
+
+  const handleRefreshDirectory = async () => {
+    setIsRefreshingUsers(true);
+    try {
+      const res = await refreshUsersDirectory();
+      if (res.error) {
+        showToast('error', `Đã tải ${res.usersCount} tài khoản cục bộ, nhưng lỗi đồng bộ Sheets: ${res.error}`);
+      } else if (res.cloudSynced) {
+        showToast('success', `Đã làm mới ${res.usersCount} tài khoản và đồng bộ lên tab "Tài khoản" trên Google Sheets.`);
+      } else {
+        showToast('success', `Đã làm mới danh sách (${res.usersCount} tài khoản).`);
+      }
+    } catch (err: any) {
+      showToast('error', err?.message || 'Không thể làm mới danh sách tài khoản.');
+    } finally {
+      setIsRefreshingUsers(false);
+    }
   };
 
   const handleOpenCreateModal = () => {
@@ -104,35 +137,42 @@ export const UserManagementView: React.FC = () => {
     setIsRegisterModalOpen(true);
   };
 
-  const handleRegisterSubmit = (e: React.FormEvent) => {
+  const handleRegisterSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setCreateError(null);
     if (!newEmail.trim() || !newFullName.trim()) {
       setCreateError('Vui lòng điền đầy đủ Email và Họ tên cán bộ.');
       return;
     }
-    if (newPassword.length < 3) {
+    if (newPassword.trim().length < 3) {
       setCreateError('Mật khẩu khởi tạo phải có ít nhất 3 ký tự.');
       return;
     }
 
-    const res = registerNewAccount({
-      email: newEmail.trim(),
-      fullName: newFullName.trim(),
-      department: newDepartment.trim() || REGISTRATION_DEPARTMENTS[0],
-      phone: newPhone.trim(),
-      role: requestedRole,
-      password: newPassword,
-      autoApprove: autoActivate,
-    });
+    setIsCreatingUser(true);
+    try {
+      const res = await registerNewAccount({
+        email: newEmail.trim(),
+        fullName: newFullName.trim(),
+        department: newDepartment.trim() || REGISTRATION_DEPARTMENTS[0],
+        phone: newPhone.trim(),
+        role: requestedRole,
+        password: newPassword.trim(),
+        autoApprove: autoActivate,
+      });
 
-    if (!res.success) {
-      setCreateError(res.message);
-      return;
+      if (!res.success) {
+        setCreateError(res.message);
+        return;
+      }
+
+      setIsRegisterModalOpen(false);
+      showToast('success', `Đã thêm tài khoản ${newFullName.trim()} thành công.`);
+    } catch (err: any) {
+      setCreateError(err?.message || 'Không thể tạo tài khoản mới. Vui lòng thử lại.');
+    } finally {
+      setIsCreatingUser(false);
     }
-
-    setIsRegisterModalOpen(false);
-    showToast('success', `Đã thêm tài khoản ${newFullName.trim()} thành công.`);
   };
 
   const handleOpenEditModal = (u: User) => {
@@ -354,15 +394,37 @@ export const UserManagementView: React.FC = () => {
 
           {/* Pending Approvals Queue */}
           <div className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-xs">
-            <div className="px-4 py-3 bg-amber-50/70 border-b border-amber-200 flex items-center justify-between">
-              <h3 className="font-bold text-slate-900 text-xs flex items-center gap-2">
-                <span>Yêu Cầu Đăng Ký Chờ Phê Duyệt</span>
-                <span className="px-1.5 py-0.5 rounded bg-amber-200/80 text-amber-950 font-mono tabular-nums text-[11px]">
-                  {pendingUsers.length}
-                </span>
-              </h3>
-              <span className="text-[11px] text-slate-600 font-medium">Chỉ Admin có quyền kích hoạt</span>
+            <div className="px-4 py-3 bg-amber-50/70 border-b border-amber-200 flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <h3 className="font-bold text-slate-900 text-xs flex items-center gap-2">
+                  <span>Yêu Cầu Đăng Ký Chờ Phê Duyệt</span>
+                  <span className="px-1.5 py-0.5 rounded bg-amber-200/80 text-amber-950 font-mono tabular-nums text-[11px]">
+                    {pendingUsers.length}
+                  </span>
+                </h3>
+              </div>
+              <div className="flex items-center gap-2.5">
+                <span className="text-[11px] text-slate-600 font-medium hidden sm:inline">Chỉ Admin có quyền kích hoạt</span>
+                <button
+                  type="button"
+                  onClick={handleRefreshDirectory}
+                  disabled={isRefreshingUsers || isPullingFromCloud}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-amber-300 bg-white hover:bg-amber-100/70 text-amber-900 text-[11px] font-semibold transition-colors disabled:opacity-50"
+                >
+                  <RefreshCw className={`w-3 h-3 ${isRefreshingUsers || isPullingFromCloud ? 'animate-spin' : ''}`} />
+                  <span>{isRefreshingUsers || isPullingFromCloud ? 'Đang tải...' : 'Làm mới'}</span>
+                </button>
+              </div>
             </div>
+
+            {isAdmin && !hasCloudSheetConnection && (
+              <div className="px-4 py-2 bg-slate-50 border-b border-slate-200 text-[11px] text-slate-600 flex items-center gap-2">
+                <AlertCircle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                <span>
+                  Chưa gắn URL Apps Script hoặc kết nối Google OAuth trong mục <strong>Đồng Bộ Sheets & Drive</strong> — tài khoản mới đang chờ trong hàng đợi máy chủ và sẽ tự động ghi lên tab <strong>Tài khoản</strong> ngay khi kết nối.
+                </span>
+              </div>
+            )}
 
             {pendingUsers.length === 0 ? (
               <div className="p-5 text-center text-xs text-slate-400">
@@ -717,9 +779,10 @@ export const UserManagementView: React.FC = () => {
             </button>
             <button
               type="submit"
-              className="px-5 py-2 bg-teal-600 hover:bg-teal-700 text-white rounded-lg font-semibold shadow-xs"
+              disabled={isCreatingUser}
+              className="px-5 py-2 bg-teal-600 hover:bg-teal-700 text-white rounded-lg font-semibold shadow-xs disabled:opacity-50"
             >
-              Tạo Hồ Sơ & Cấp Quyền
+              {isCreatingUser ? 'Đang tạo...' : 'Tạo Hồ Sơ & Cấp Quyền'}
             </button>
           </div>
         </form>

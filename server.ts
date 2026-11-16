@@ -98,6 +98,12 @@ async function startServer() {
 
   app.use(express.json({ limit: '6mb' }));
 
+  app.use('/api', (_req: Request, res: Response, next) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+    res.setHeader('Pragma', 'no-cache');
+    next();
+  });
+
   // Liveness / readiness health check
   app.get('/healthz', (_req: Request, res: Response) => {
     res.status(200).send('OK');

@@ -470,7 +470,10 @@ export const UserManagementView: React.FC = () => {
                               </button>
                             )}
                             <button
-                              onClick={() => approveUser(u.id, u.role)}
+                              onClick={() => {
+                                approveUser(u.id, u.role);
+                                showToast('success', `Đã phê duyệt và kích hoạt tài khoản ${u.fullName}.`);
+                              }}
                               disabled={!isAdmin}
                               className="flex items-center gap-1 px-3 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-md text-[11px] font-semibold disabled:opacity-40 transition-colors"
                             >
@@ -478,7 +481,10 @@ export const UserManagementView: React.FC = () => {
                               <span>Phê Duyệt</span>
                             </button>
                             <button
-                              onClick={() => rejectUser(u.id)}
+                              onClick={() => {
+                                rejectUser(u.id);
+                                showToast('success', `Đã từ chối yêu cầu đăng ký của ${u.fullName}.`);
+                              }}
                               disabled={!isAdmin}
                               className="flex items-center gap-1 px-2.5 py-1 border border-rose-200 hover:bg-rose-50 text-rose-700 rounded-md text-[11px] font-semibold disabled:opacity-40 transition-colors"
                             >

@@ -705,7 +705,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const fetchRelayedUsersFromServer = useCallback(async (): Promise<(User & { cloudSyncedToSheets?: boolean })[]> => {
     try {
-      const res = await fetch('/api/pending-registrations');
+      const res = await fetch('/api/pending-registrations', { cache: 'no-store' });
       const ct = res.headers.get('content-type') || '';
       if (!res.ok || !ct.includes('application/json')) return [];
       const data = await res.json();
@@ -1010,25 +1010,67 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
       }
 
-      // 2. Parse Sheet "Tài khoản" (authoritative for cloud updates, while preserving locally pending registrations & server-relayed users)
+      // 2. Parse Sheet "Tài khoản" (authoritative for synced accounts, while NEVER dropping pending or server-relayed registrations)
       hasPulledFromCloudRef.current = true;
       const relayedUsers = await fetchRelayedUsersFromServer();
       const localUsersSnapshot = latestStateRef.current.users;
       const baseUsers =
         stateJson?.users && stateJson.users.length > 0 ? stateJson.users : localUsersSnapshot;
-      const cloudUsers =
+      const rawCloudUsers =
         accountRows.length >= 2 ? parseUsersFromAccountSheet(accountRows, baseUsers) : baseUsers;
 
-      // Preserve any locally created or server-relayed pending accounts not yet present in Google Sheets
-      const pendingUsersToPreserve = localUsersSnapshot.filter(
-        (lu) =>
-          (pendingUnsyncedUserIdsRef.current.has(lu.id) ||
-            relayedUsers.some((ru) => ru.id === lu.id && ru.cloudSyncedToSheets === false)) &&
-          !cloudUsers.some(
-            (cu) => cu.id === lu.id || cu.email.trim().toLowerCase() === lu.email.trim().toLowerCase()
-          )
+      // Apply any fresher non-pending admin decisions from server relay if Sheets still says PENDING_APPROVAL
+      const cloudUsers = rawCloudUsers.map((cu) => {
+        const relayedMatch = relayedUsers.find(
+          (ru) =>
+            ru.id === cu.id ||
+            (cu.email && ru.email && ru.email.trim().toLowerCase() === cu.email.trim().toLowerCase())
+        );
+        if (relayedMatch && cu.status === 'PENDING_APPROVAL' && relayedMatch.status !== 'PENDING_APPROVAL') {
+          return { ...cu, ...relayedMatch };
+        }
+        return cu;
+      });
+
+      // Preserve any PENDING_APPROVAL, unsynced, or server-relayed accounts missing from Google Sheets / Drive
+      const preservedMap = new Map<string, User>();
+      const seenEmails = new Set<string>(
+        cloudUsers.map((cu) => cu.email.trim().toLowerCase()).filter(Boolean)
       );
-      const mergedUsers = [...cloudUsers, ...pendingUsersToPreserve];
+      const seenIds = new Set<string>(cloudUsers.map((cu) => cu.id));
+
+      [...localUsersSnapshot, ...relayedUsers].forEach((candidate) => {
+        if (!candidate || !candidate.id || !candidate.email) return;
+        const normEmail = candidate.email.trim().toLowerCase();
+        if (seenIds.has(candidate.id) || seenEmails.has(normEmail) || preservedMap.has(candidate.id)) {
+          return;
+        }
+        const isFromRelay = relayedUsers.some((ru) => ru.id === candidate.id);
+        const shouldPreserve =
+          candidate.status === 'PENDING_APPROVAL' ||
+          pendingUnsyncedUserIdsRef.current.has(candidate.id) ||
+          isFromRelay;
+
+        if (shouldPreserve) {
+          preservedMap.set(candidate.id, {
+            id: candidate.id,
+            email: candidate.email,
+            password: candidate.password || '123',
+            fullName: candidate.fullName,
+            role: candidate.role,
+            status: candidate.status,
+            department: candidate.department,
+            phone: candidate.phone || '',
+            createdAt: candidate.createdAt || getTodayISODate(),
+            approvedAt: candidate.approvedAt,
+            approvedBy: candidate.approvedBy,
+          });
+          seenIds.add(candidate.id);
+          seenEmails.add(normEmail);
+        }
+      });
+
+      const mergedUsers = [...cloudUsers, ...Array.from(preservedMap.values())];
 
       if (mergedUsers.length > 0) {
         latestStateRef.current.users = mergedUsers;
@@ -1091,7 +1133,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       await fetchRelayedUsersFromServer();
 
       try {
-        const cfgRes = await fetch('/api/cloud-bridge');
+        const cfgRes = await fetch('/api/cloud-bridge', { cache: 'no-store' });
         const ct = cfgRes.headers.get('content-type') || '';
         if (cfgRes.ok && ct.includes('application/json')) {
           const cfgData = await cfgRes.json();
@@ -1134,6 +1176,69 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       active = false;
     };
   }, [fetchRelayedUsersFromServer, pullFromSheetsAndDrive]);
+
+  const autoPushedRelayIdsRef = useRef<Set<string>>(new Set());
+
+  // Live background sync while logged in so Admin sees new registrations from any tab/browser within seconds
+  useEffect(() => {
+    if (!isAuthenticated) return;
+
+    const syncRelayedRegistrations = async () => {
+      const relayed = await fetchRelayedUsersFromServer();
+      if (!relayed || relayed.length === 0) return;
+
+      const isAdmin = latestStateRef.current.currentUser?.role === 'ADMIN';
+      const activeSettings = latestStateRef.current.templateSettings;
+      const hasAppsScript = isValidAppsScriptUrl(activeSettings.appsScriptUrl);
+      const pendingSyncIds = relayed
+        .filter((ru) => ru.cloudSyncedToSheets === false && !autoPushedRelayIdsRef.current.has(ru.id))
+        .map((ru) => ru.id);
+
+      if (isAdmin && hasAppsScript && pendingSyncIds.length > 0) {
+        pendingSyncIds.forEach((id) => autoPushedRelayIdsRef.current.add(id));
+        try {
+          const accRes = await syncAccountSheetViaAppsScript(
+            activeSettings.appsScriptUrl,
+            latestStateRef.current.users,
+            activeSettings,
+            hasPulledFromCloudRef.current ? buildSnapshotPayload() : undefined
+          );
+          if (accRes.success) {
+            latestStateRef.current.users.forEach((u) => pendingUnsyncedUserIdsRef.current.delete(u.id));
+            savePendingUnsyncedIds();
+            fetch('/api/pending-registrations/mark-synced', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ ids: latestStateRef.current.users.map((u) => u.id) }),
+            }).catch(() => null);
+          }
+        } catch {
+          // Will keep in local/server queue and retry on explicit refresh or next registration
+        }
+      }
+    };
+
+    void syncRelayedRegistrations();
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        void syncRelayedRegistrations();
+      }
+    }, 4000);
+    const onFocusOrVisible = () => {
+      if (document.visibilityState === 'visible') {
+        void syncRelayedRegistrations();
+      }
+    };
+
+    window.addEventListener('focus', onFocusOrVisible);
+    document.addEventListener('visibilitychange', onFocusOrVisible);
+
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener('focus', onFocusOrVisible);
+      document.removeEventListener('visibilitychange', onFocusOrVisible);
+    };
+  }, [isAuthenticated, currentUser?.role, fetchRelayedUsersFromServer, buildSnapshotPayload, savePendingUnsyncedIds]);
 
   const executeHybridSheetsSync = async (
     token: string | null,
@@ -1580,83 +1685,103 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
   };
 
+  const refreshInFlightRef = useRef<Promise<{
+    usersCount: number;
+    cloudSynced: boolean;
+    error?: string;
+  }> | null>(null);
+
   const refreshUsersDirectory = useCallback(async (): Promise<{
     usersCount: number;
     cloudSynced: boolean;
     error?: string;
   }> => {
-    if (!isValidAppsScriptUrl(latestStateRef.current.templateSettings.appsScriptUrl)) {
-      try {
-        const cfgRes = await fetch('/api/cloud-bridge');
-        const ct = cfgRes.headers.get('content-type') || '';
-        if (cfgRes.ok && ct.includes('application/json')) {
-          const cfgData = await cfgRes.json();
-          if (cfgData?.config?.appsScriptUrl && isValidAppsScriptUrl(cfgData.config.appsScriptUrl)) {
-            const updated = migrateTemplateSettings({
-              ...latestStateRef.current.templateSettings,
-              ...cfgData.config,
-            });
-            latestStateRef.current.templateSettings = updated;
-            setTemplateSettings(updated);
-          }
-        }
-      } catch {
-        // Ignore on static hosting
-      }
+    if (refreshInFlightRef.current) {
+      return refreshInFlightRef.current;
     }
 
-    const relayed = await fetchRelayedUsersFromServer();
-    const activeSettings = latestStateRef.current.templateSettings;
-    const hasAppsScript = isValidAppsScriptUrl(activeSettings.appsScriptUrl);
-    let cloudSynced = false;
-    let error: string | undefined;
-
-    if (hasAppsScript) {
-      await pullFromSheetsAndDrive(true);
-    }
-
-    const hasUnsyncedRelayed =
-      pendingUnsyncedUserIdsRef.current.size > 0 ||
-      relayed.some((ru) => ru.cloudSyncedToSheets === false);
-
-    if (hasUnsyncedRelayed) {
-      const token = await getAccessToken();
-      const isAdmin = latestStateRef.current.currentUser?.role === 'ADMIN';
-      if (hasAppsScript) {
+    const task = (async () => {
+      if (!isValidAppsScriptUrl(latestStateRef.current.templateSettings.appsScriptUrl)) {
         try {
-          const accRes = await syncAccountSheetViaAppsScript(
-            activeSettings.appsScriptUrl,
-            latestStateRef.current.users,
-            activeSettings,
-            hasPulledFromCloudRef.current ? buildSnapshotPayload() : undefined
-          );
-          if (accRes.success) {
-            cloudSynced = true;
-            latestStateRef.current.users.forEach((u) => pendingUnsyncedUserIdsRef.current.delete(u.id));
-            savePendingUnsyncedIds();
-            fetch('/api/pending-registrations/mark-synced', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ ids: latestStateRef.current.users.map((u) => u.id) }),
-            }).catch(() => null);
+          const cfgRes = await fetch('/api/cloud-bridge', { cache: 'no-store' });
+          const ct = cfgRes.headers.get('content-type') || '';
+          if (cfgRes.ok && ct.includes('application/json')) {
+            const cfgData = await cfgRes.json();
+            if (cfgData?.config?.appsScriptUrl && isValidAppsScriptUrl(cfgData.config.appsScriptUrl)) {
+              const updated = migrateTemplateSettings({
+                ...latestStateRef.current.templateSettings,
+                ...cfgData.config,
+              });
+              latestStateRef.current.templateSettings = updated;
+              setTemplateSettings(updated);
+            }
           }
-        } catch (err: any) {
-          error = err?.message;
+        } catch {
+          // Ignore on static hosting
         }
-      } else if (isAdmin && token) {
-        const res = await executeHybridSheetsSync(
-          token,
-          'Đồng bộ tài khoản đăng ký mới lên tab Tài khoản'
-        );
-        cloudSynced = !!res?.success;
       }
-    }
 
-    return {
-      usersCount: latestStateRef.current.users.length,
-      cloudSynced,
-      error,
-    };
+      const relayed = await fetchRelayedUsersFromServer();
+      const activeSettings = latestStateRef.current.templateSettings;
+      const hasAppsScript = isValidAppsScriptUrl(activeSettings.appsScriptUrl);
+      let cloudSynced = false;
+      let error: string | undefined;
+
+      if (hasAppsScript) {
+        await pullFromSheetsAndDrive(true);
+      }
+
+      const hasUnsyncedRelayed =
+        pendingUnsyncedUserIdsRef.current.size > 0 ||
+        relayed.some((ru) => ru.cloudSyncedToSheets === false) ||
+        latestStateRef.current.users.some((u) => u.status === 'PENDING_APPROVAL' && relayed.some((ru) => ru.id === u.id && ru.cloudSyncedToSheets === false));
+
+      if (hasUnsyncedRelayed) {
+        const token = await getAccessToken();
+        const isAdmin = latestStateRef.current.currentUser?.role === 'ADMIN';
+        if (hasAppsScript) {
+          try {
+            const accRes = await syncAccountSheetViaAppsScript(
+              activeSettings.appsScriptUrl,
+              latestStateRef.current.users,
+              activeSettings,
+              hasPulledFromCloudRef.current ? buildSnapshotPayload() : undefined
+            );
+            if (accRes.success) {
+              cloudSynced = true;
+              latestStateRef.current.users.forEach((u) => pendingUnsyncedUserIdsRef.current.delete(u.id));
+              savePendingUnsyncedIds();
+              fetch('/api/pending-registrations/mark-synced', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ids: latestStateRef.current.users.map((u) => u.id) }),
+              }).catch(() => null);
+            }
+          } catch (err: any) {
+            error = err?.message;
+          }
+        } else if (isAdmin && token) {
+          const res = await executeHybridSheetsSync(
+            token,
+            'Đồng bộ tài khoản đăng ký mới lên tab Tài khoản'
+          );
+          cloudSynced = !!res?.success;
+        }
+      }
+
+      return {
+        usersCount: latestStateRef.current.users.length,
+        cloudSynced,
+        error,
+      };
+    })();
+
+    refreshInFlightRef.current = task;
+    try {
+      return await task;
+    } finally {
+      refreshInFlightRef.current = null;
+    }
   }, [buildSnapshotPayload, fetchRelayedUsersFromServer, pullFromSheetsAndDrive, savePendingUnsyncedIds]);
 
   // User Administration & RBAC Authentication
@@ -1742,7 +1867,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // Discover latest shared Apps Script URL from server in case Admin configured it on another browser/tab
     if (!isValidAppsScriptUrl(latestStateRef.current.templateSettings.appsScriptUrl)) {
       try {
-        const cfgRes = await fetch('/api/cloud-bridge');
+        const cfgRes = await fetch('/api/cloud-bridge', { cache: 'no-store' });
         const ct = cfgRes.headers.get('content-type') || '';
         if (cfgRes.ok && ct.includes('application/json')) {
           const cfgData = await cfgRes.json();
@@ -1764,11 +1889,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const activeSettings = latestStateRef.current.templateSettings;
     const hasAppsScript = isValidAppsScriptUrl(activeSettings.appsScriptUrl);
-
-    // Pull latest cloud state first so duplicate checks & user directory stay in sync without overwriting voucher sheets
-    if (hasAppsScript && !hasPulledFromCloudRef.current) {
-      await pullFromSheetsAndDrive(true);
-    }
 
     const existing = latestStateRef.current.users.find(
       (u) =>
@@ -1793,7 +1913,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       approvedBy: data.autoApprove ? (currentUser?.fullName || 'Quản trị viên') : undefined,
     };
 
-    // Persist to cross-browser server relay so Admin sees the registration from any tab/browser/device
+    // Persist IMMEDIATELY to cross-browser server relay so Admin sees the registration right away from any tab/browser/device
     try {
       const relayRes = await fetch('/api/pending-registrations', {
         method: 'POST',
@@ -1838,9 +1958,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     if (hasAppsScript) {
       try {
+        // Pull latest cloud directory first if not pulled yet (newUser stays preserved via relay & pending status)
+        if (!hasPulledFromCloudRef.current) {
+          await pullFromSheetsAndDrive(true);
+        }
+        const usersToSync = latestStateRef.current.users.some((u) => u.id === newUser.id)
+          ? latestStateRef.current.users
+          : [...latestStateRef.current.users, newUser];
+
         const syncRes = await syncAccountSheetViaAppsScript(
           activeSettings.appsScriptUrl,
-          nextUsers,
+          usersToSync,
           activeSettings,
           hasPulledFromCloudRef.current ? buildSnapshotPayload() : undefined
         );

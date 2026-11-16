@@ -468,6 +468,12 @@ export const syncAccountSheetViaAppsScript = async (
     stateJson: stateSnapshot || undefined,
   });
 
+  if (data?.rowCounts && typeof data.rowCounts.accounts !== 'number') {
+    throw new Error(
+      'Google Apps Script đang chạy phiên bản cũ (chưa hỗ trợ tab "Tài khoản"). Admin vui lòng cập nhật mã Code.gs mới và Triển khai phiên bản mới.'
+    );
+  }
+
   const now = new Date();
   const fallbackTs = `${now.toLocaleTimeString('vi-VN')} ${now.toLocaleDateString('vi-VN')}`;
 

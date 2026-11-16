@@ -5,6 +5,7 @@
 
 import React, { useEffect } from 'react';
 import { X } from 'lucide-react';
+import { AnimatePresence, motion } from 'motion/react';
 
 interface ModalProps {
   isOpen: boolean;
@@ -14,6 +15,8 @@ interface ModalProps {
   children: React.ReactNode;
   maxWidth?: 'sm' | 'md' | 'lg' | 'xl' | '2xl' | '3xl' | '4xl' | '5xl';
 }
+
+const EASE_OUT = [0.16, 1, 0.3, 1] as const;
 
 export const Modal: React.FC<ModalProps> = ({
   isOpen,
@@ -37,8 +40,6 @@ export const Modal: React.FC<ModalProps> = ({
     };
   }, [isOpen, onClose]);
 
-  if (!isOpen) return null;
-
   const maxWidthClass = {
     sm: 'max-w-sm',
     md: 'max-w-md',
@@ -51,25 +52,44 @@ export const Modal: React.FC<ModalProps> = ({
   }[maxWidth];
 
   return (
-    <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
-      <div
-        className={`bg-white rounded-xl shadow-2xl w-full ${maxWidthClass} overflow-hidden border border-slate-200 animate-in fade-in zoom-in-95 duration-150 flex flex-col max-h-[90vh]`}
-      >
-        <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between bg-slate-50">
-          <div>
-            <h3 className="font-bold text-slate-900 text-base">{title}</h3>
-            {subtitle && <p className="text-xs text-slate-500 mt-0.5">{subtitle}</p>}
-          </div>
-          <button
-            onClick={onClose}
-            className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-200 rounded-lg transition-colors"
+    <AnimatePresence>
+      {isOpen && (
+        <motion.div
+          key="modal-backdrop"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 0.2, ease: EASE_OUT }}
+          onClick={(e) => {
+            if (e.target === e.currentTarget) onClose();
+          }}
+          className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4"
+        >
+          <motion.div
+            key="modal-dialog"
+            initial={{ opacity: 0, scale: 0.9, y: 24 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.93, y: 14 }}
+            transition={{ type: 'spring', stiffness: 360, damping: 26 }}
+            className={`bg-white rounded-xl shadow-2xl w-full ${maxWidthClass} overflow-hidden border border-slate-200 flex flex-col max-h-[90vh]`}
           >
-            <X className="w-5 h-5" />
-          </button>
-        </div>
+            <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between bg-slate-50">
+              <div>
+                <h3 className="font-bold text-slate-900 text-base">{title}</h3>
+                {subtitle && <p className="text-xs text-slate-500 mt-0.5">{subtitle}</p>}
+              </div>
+              <button
+                onClick={onClose}
+                className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-200 rounded-lg transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
 
-        <div className="p-6 overflow-y-auto flex-1">{children}</div>
-      </div>
-    </div>
+            <div className="p-6 overflow-y-auto flex-1">{children}</div>
+          </motion.div>
+        </motion.div>
+      )}
+    </AnimatePresence>
   );
 };

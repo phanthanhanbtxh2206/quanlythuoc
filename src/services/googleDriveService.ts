@@ -156,3 +156,108 @@ export const uploadFileToGoogleDrive = async (
     };
   }
 };
+
+/**
+ * Find a file by exact name inside a Google Drive folder path
+ */
+const findFileInDriveFolder = async (
+  accessToken: string,
+  folderPath: string,
+  fileName: string
+): Promise<{ fileId?: string; folderId?: string; webViewLink?: string }> => {
+  const folderId = await ensureDriveFolderPath(accessToken, folderPath);
+  const cleanName = fileName.replace(/'/g, "\\'").trim();
+  const qParts = [`name = '${cleanName}'`, `trashed = false`];
+  if (folderId) {
+    qParts.push(`'${folderId}' in parents`);
+  }
+  const query = encodeURIComponent(qParts.join(' and '));
+  const res = await fetch(
+    `https://www.googleapis.com/drive/v3/files?q=${query}&fields=files(id,name,webViewLink)&pageSize=1`,
+    {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    }
+  );
+  if (!res.ok) return { folderId };
+  const data = await res.json();
+  const found = data.files?.[0];
+  return {
+    fileId: found?.id,
+    webViewLink: found?.webViewLink,
+    folderId,
+  };
+};
+
+/**
+ * Upsert (overwrite existing or create new) the JSON system state snapshot on Google Drive
+ */
+export const upsertJsonFileInGoogleDrive = async (
+  accessToken: string,
+  folderPath: string,
+  fileName: string,
+  jsonContent: string
+): Promise<GoogleDriveUploadResult> => {
+  try {
+    const existing = await findFileInDriveFolder(accessToken, folderPath, fileName);
+    if (existing.fileId) {
+      const updateRes = await fetch(
+        `https://www.googleapis.com/upload/drive/v3/files/${existing.fileId}?uploadType=media&fields=id,name,webViewLink`,
+        {
+          method: 'PATCH',
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/json; charset=UTF-8',
+          },
+          body: jsonContent,
+        }
+      );
+      if (updateRes.ok) {
+        const updated = await updateRes.json();
+        return {
+          success: true,
+          fileId: updated.id,
+          webViewLink: updated.webViewLink || `https://drive.google.com/file/d/${updated.id}/view`,
+          folderId: existing.folderId,
+        };
+      }
+    }
+
+    return await uploadFileToGoogleDrive(accessToken, folderPath, fileName, jsonContent, 'application/json');
+  } catch (err: any) {
+    return {
+      success: false,
+      error: err?.message || 'Lỗi ghi tệp trạng thái JSON lên Google Drive.',
+    };
+  }
+};
+
+/**
+ * Read the JSON system state snapshot from Google Drive for two-way sync
+ */
+export const readJsonFileFromGoogleDrive = async (
+  accessToken: string,
+  folderPath: string,
+  fileName: string
+): Promise<{ success: boolean; content?: string; fileId?: string; error?: string }> => {
+  try {
+    const found = await findFileInDriveFolder(accessToken, folderPath, fileName);
+    if (!found.fileId) {
+      return { success: false, error: 'Chưa tìm thấy bản sao lưu trạng thái JSON trên Google Drive.' };
+    }
+    const res = await fetch(
+      `https://www.googleapis.com/drive/v3/files/${found.fileId}?alt=media`,
+      {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      }
+    );
+    if (!res.ok) {
+      const errText = await res.text();
+      return { success: false, error: `Lỗi đọc tệp Drive (${res.status}): ${errText}` };
+    }
+    const content = await res.text();
+    return { success: true, content, fileId: found.fileId };
+  } catch (err: any) {
+    return { success: false, error: err?.message || 'Không thể tải dữ liệu từ Google Drive.' };
+  }
+};
+

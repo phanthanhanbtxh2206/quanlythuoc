@@ -21,8 +21,8 @@ import {
   Link2,
   Terminal,
   Wrench,
+  ArrowDownToLine,
 } from 'lucide-react';
-import { formatDate } from '../../utils/formatters';
 import {
   GOOGLE_APPS_SCRIPT_TEMPLATE,
   isValidAppsScriptUrl,
@@ -34,6 +34,7 @@ export const SyncSheetsDriveView: React.FC = () => {
   const {
     currentUser,
     hasPermission,
+    users,
     syncedFiles,
     medicines,
     beneficiaries,
@@ -49,8 +50,10 @@ export const SyncSheetsDriveView: React.FC = () => {
     loginWithGoogle,
     logoutFromGoogle,
     syncNowToGoogleSheets,
+    pullFromSheetsAndDrive,
     testAppsScriptSync,
     isSyncingSheets,
+    isPullingFromCloud,
     syncSheetsError,
     lastSheetsSyncResult,
   } = useApp();
@@ -102,12 +105,17 @@ export const SyncSheetsDriveView: React.FC = () => {
       desc: 'Bảng tổng hợp Tồn đầu, Nhập, Xuất, Tồn cuối kỳ từng đối tượng',
       rows: beneficiaries.length,
     },
+    {
+      name: 'Sheet Tài khoản',
+      desc: 'Danh sách cán bộ, email, phòng ban, vai trò, trạng thái duyệt & mật khẩu (đồng bộ 2 chiều)',
+      rows: users.length,
+    },
     { name: 'MEDICINES', desc: 'Danh mục thuốc, hoạt chất, quy cách', rows: medicines.length },
     { name: 'BENEFICIARIES', desc: 'Hồ sơ đối tượng bảo trợ và số thẻ BHYT', rows: beneficiaries.length },
     { name: 'STOCK_RECEIPTS', desc: `Chứng từ phiếu nhập kho (${templateSettings.receiptFormCode})`, rows: receipts.length },
     { name: 'STOCK_ISSUES', desc: `Chứng từ phiếu xuất kho (${templateSettings.issueFormCode})`, rows: issues.length },
     { name: 'STOCK_TRANSACTIONS', desc: 'Sổ nhật ký biến động kho Dược', rows: transactions.length },
-    { name: 'FILES_DRIVE', desc: 'Bảng theo dõi chứng từ đã lưu Google Drive', rows: syncedFiles.length },
+    { name: 'FILES_DRIVE', desc: 'Bảng theo dõi chứng từ & snapshot JSON trên Google Drive', rows: syncedFiles.length },
   ];
 
   const handleSaveConnectionSettings = () => {
@@ -167,9 +175,22 @@ export const SyncSheetsDriveView: React.FC = () => {
     if (result && result.success) {
       if (result.spreadsheetUrl) setSheetUrlInput(result.spreadsheetUrl);
       setSyncSuccessMessage(
-        `Đồng bộ trực tiếp lên Google Sheets thành công qua ${
+        `Đồng bộ trực tiếp lên Google Sheets (04 Sheet) & Google Drive JSON thành công qua ${
           result.channel === 'APPS_SCRIPT' ? 'Google Apps Script Bridge' : 'Google OAuth API'
-        }! (${result.rowCounts.receipts} PNK, ${result.rowCounts.issues} PXK, ${result.rowCounts.reports} báo cáo)`
+        }! (${result.rowCounts.receipts} PNK, ${result.rowCounts.issues} PXK, ${result.rowCounts.reports} báo cáo, ${result.rowCounts.accounts || users.length} tài khoản)`
+      );
+      setTimeout(() => setSyncSuccessMessage(null), 7000);
+    }
+  };
+
+  const handlePullFromCloud = async () => {
+    handleSaveConnectionSettings();
+    const res = await pullFromSheetsAndDrive(false);
+    if (res.success) {
+      setSyncSuccessMessage(
+        `Kéo dữ liệu hai chiều thành công (${res.usersUpdated || 0} tài khoản từ Sheet Tài khoản${
+          res.restoredFromDrive ? ', đã khôi phục kho dữ liệu từ Google Drive JSON' : ''
+        }).`
       );
       setTimeout(() => setSyncSuccessMessage(null), 7000);
     }
@@ -244,6 +265,16 @@ export const SyncSheetsDriveView: React.FC = () => {
               <span>Mở Google Sheets</span>
             </a>
           )}
+
+          <button
+            onClick={handlePullFromCloud}
+            disabled={isPullingFromCloud || isSyncingSheets}
+            className="flex items-center gap-1.5 px-3.5 py-2 border border-cyan-600/40 bg-cyan-50 hover:bg-cyan-100 text-cyan-900 rounded-lg text-xs font-semibold transition-colors disabled:opacity-50"
+            title="Tải ngược tài khoản từ Sheet Tài khoản & snapshot JSON từ Google Drive về phiên làm việc"
+          >
+            <ArrowDownToLine className={`w-4 h-4 ${isPullingFromCloud ? 'animate-bounce' : ''}`} />
+            <span>{isPullingFromCloud ? 'Đang kéo về...' : 'Kéo Dữ Liệu Hai Chiều Về Máy'}</span>
+          </button>
 
           <button
             onClick={handleTriggerSync}
@@ -507,7 +538,7 @@ export const SyncSheetsDriveView: React.FC = () => {
               <FileSpreadsheet className="w-4 h-4 text-teal-600" />
               <h4 className="font-bold text-slate-900 text-sm">Cấu Trúc Bảng Dữ Liệu Google Sheets</h4>
             </div>
-            <span className="text-2xs text-teal-700 font-semibold">Khớp chuẩn 03 Sheet chính</span>
+            <span className="text-2xs text-teal-700 font-semibold">Khớp chuẩn 04 Sheet hai chiều</span>
           </div>
 
           <div className="divide-y divide-slate-100 text-xs">
@@ -625,9 +656,9 @@ export const SyncSheetsDriveView: React.FC = () => {
           <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-xl text-amber-900 flex items-start gap-3">
             <AlertCircle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
             <div>
-              <div className="font-bold mb-1">Cập nhật đồng bộ 03 trang tính</div>
+              <div className="font-bold mb-1">Cập nhật đồng bộ 04 trang tính &amp; Drive JSON</div>
               <p className="text-amber-800 leading-relaxed">
-                Dữ liệu hiện tại của <strong>Phiếu nhập</strong>, <strong>Phiếu xuất</strong> và <strong>Báo cáo</strong> sẽ được ghi lên Google Sheets thông qua kênh{' '}
+                Dữ liệu hiện tại của <strong>Phiếu nhập</strong>, <strong>Phiếu xuất</strong>, <strong>Báo cáo</strong>, <strong>Tài khoản</strong> và tệp khôi phục JSON trên Google Drive sẽ được đồng bộ qua kênh{' '}
                 <strong>{hasValidScript ? 'Google Apps Script Bridge' : 'Google OAuth API'}</strong>.
               </p>
             </div>

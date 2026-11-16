@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useApp } from '../../context/AppContext';
-import { User, UserRole, UserStatus, ROLE_PERMISSIONS } from '../../types';
+import { User, UserRole, UserStatus, ROLE_PERMISSIONS, REGISTRATION_DEPARTMENTS } from '../../types';
 import {
   ShieldCheck,
   UserPlus,
@@ -42,7 +42,7 @@ export const UserManagementView: React.FC = () => {
   const [newEmail, setNewEmail] = useState('');
   const [newPassword, setNewPassword] = useState('123456');
   const [newFullName, setNewFullName] = useState('');
-  const [newDepartment, setNewDepartment] = useState('Phòng Y tế - PHCN');
+  const [newDepartment, setNewDepartment] = useState<string>(REGISTRATION_DEPARTMENTS[0]);
   const [newPhone, setNewPhone] = useState('');
   const [requestedRole, setRequestedRole] = useState<UserRole>('DOCTOR');
   const [autoActivate, setAutoActivate] = useState(true);
@@ -97,7 +97,7 @@ export const UserManagementView: React.FC = () => {
     setNewEmail('');
     setNewPassword('123456');
     setNewFullName('');
-    setNewDepartment('Phòng Y tế - PHCN');
+    setNewDepartment(REGISTRATION_DEPARTMENTS[0]);
     setNewPhone('');
     setRequestedRole('DOCTOR');
     setAutoActivate(true);
@@ -119,7 +119,7 @@ export const UserManagementView: React.FC = () => {
     const res = registerNewAccount({
       email: newEmail.trim(),
       fullName: newFullName.trim(),
-      department: newDepartment.trim() || 'Phòng Y tế - PHCN',
+      department: newDepartment.trim() || REGISTRATION_DEPARTMENTS[0],
       phone: newPhone.trim(),
       role: requestedRole,
       password: newPassword,
@@ -201,20 +201,20 @@ export const UserManagementView: React.FC = () => {
       );
     });
 
-  // Permission Matrix Feature Definitions (including Admin-only Cloud Sync)
+  // Permission Matrix Feature Definitions (including creator ownership & Admin-only 4-sheet Cloud Sync)
   const permissionFeatures: { key: keyof typeof ROLE_PERMISSIONS['ADMIN']; name: string; desc: string }[] = [
     { key: 'canCreateReceipt', name: 'Lập Phiếu Nhập Kho', desc: 'Tạo phiếu nhập mới C20-HD, thêm thuốc tự do, nhập đơn giá chi tiết' },
-    { key: 'canEditReceipt', name: 'Chỉnh Sửa Phiếu Nhập', desc: 'Sửa nội dung chứng từ, số lô, số lượng phiếu nhập đã lập' },
-    { key: 'canDeleteReceipt', name: 'Xóa Phiếu Nhập', desc: 'Xóa phiếu nhập và trừ lại số lượng trong kho' },
+    { key: 'canEditReceipt', name: 'Chỉnh Sửa Phiếu Nhập', desc: 'Admin sửa mọi phiếu; cán bộ chỉ sửa được phiếu do chính tài khoản mình tạo' },
+    { key: 'canDeleteReceipt', name: 'Xóa Phiếu Nhập', desc: 'Admin xóa mọi phiếu; cán bộ chỉ xóa được phiếu do chính tài khoản mình tạo' },
     { key: 'canCreateIssue', name: 'Lập Phiếu Xuất Kho', desc: 'Tạo phiếu xuất C21-HD, trích xuất thuốc theo đối tượng' },
-    { key: 'canEditIssue', name: 'Chỉnh Sửa Phiếu Xuất', desc: 'Sửa thuốc xuất, người nhận, lý do xuất kho' },
-    { key: 'canDeleteIssue', name: 'Xóa Phiếu Xuất', desc: 'Hủy phiếu xuất và hoàn trả thuốc về kho' },
+    { key: 'canEditIssue', name: 'Chỉnh Sửa Phiếu Xuất', desc: 'Admin sửa mọi phiếu; cán bộ chỉ sửa được phiếu do chính tài khoản mình tạo' },
+    { key: 'canDeleteIssue', name: 'Xóa Phiếu Xuất', desc: 'Admin xóa mọi phiếu; cán bộ chỉ xóa được phiếu do chính tài khoản mình tạo' },
     { key: 'canEditReport', name: 'Hiệu Chỉnh Biểu Mẫu Báo Cáo', desc: 'Bật chế độ sửa số liệu, đơn giá, ngày tháng trên bảng báo cáo' },
-    { key: 'canExportReport', name: 'Xuất Báo Cáo & In Ấn', desc: 'Xuất file Excel 03 sheet, CSV, in trực tiếp theo khổ A4' },
+    { key: 'canExportReport', name: 'Xuất Báo Cáo & In Ấn', desc: 'Xuất file Excel 04 sheet, CSV, in trực tiếp theo khổ A4' },
     { key: 'canManageSettings', name: 'Cấu Hình Biểu Mẫu Mặc Định', desc: 'Thay đổi tiêu ngữ, tiêu đề, tên cột, ghi chú và chữ ký' },
     { key: 'canManageUsers', name: 'Phân Quyền & Cán Bộ', desc: 'Duyệt tài khoản mới, chỉnh sửa toàn bộ hồ sơ, đặt lại mật khẩu, khóa/mở tài khoản' },
     { key: 'canViewAudit', name: 'Xem Nhật Ký Kiểm Toán', desc: 'Theo dõi nhật ký truy vết chi tiết mọi thao tác trong hệ thống' },
-    { key: 'canManageSync', name: 'Sao Lưu & Đồng Bộ Google Sheets / Drive', desc: 'Kết nối Apps Script & OAuth, tự động đồng bộ 03 Sheet và lưu chứng từ lên Drive (Chỉ Admin)' },
+    { key: 'canManageSync', name: 'Sao Lưu & Đồng Bộ Google Sheets / Drive', desc: 'Kết nối Apps Script & OAuth, đồng bộ 2 chiều 04 Sheet (gồm Tài khoản) và Drive JSON (Chỉ Admin)' },
   ];
 
   const activeCount = users.filter((u) => u.status === 'ACTIVE').length;
@@ -644,13 +644,17 @@ export const UserManagementView: React.FC = () => {
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label className="block text-slate-700 font-semibold mb-1">Phòng ban / Đơn vị *</label>
-              <input
-                type="text"
-                required
+              <select
                 value={newDepartment}
                 onChange={(e) => setNewDepartment(e.target.value)}
-                className="w-full p-2 border border-slate-200 rounded-lg"
-              />
+                className="w-full p-2 border border-slate-200 rounded-lg bg-white"
+              >
+                {REGISTRATION_DEPARTMENTS.map((dept) => (
+                  <option key={dept} value={dept}>
+                    {dept}
+                  </option>
+                ))}
+              </select>
             </div>
 
             <div>
@@ -775,13 +779,20 @@ export const UserManagementView: React.FC = () => {
 
             <div>
               <label className="block text-slate-700 font-semibold mb-1">Phòng ban / Đơn vị *</label>
-              <input
-                type="text"
-                required
+              <select
                 value={editDepartment}
                 onChange={(e) => setEditDepartment(e.target.value)}
-                className="w-full p-2 border border-slate-300 rounded-lg text-slate-900 focus:border-teal-600"
-              />
+                className="w-full p-2 border border-slate-300 rounded-lg text-slate-900 bg-white focus:border-teal-600"
+              >
+                {!REGISTRATION_DEPARTMENTS.includes(editDepartment as (typeof REGISTRATION_DEPARTMENTS)[number]) && editDepartment && (
+                  <option value={editDepartment}>{editDepartment}</option>
+                )}
+                {REGISTRATION_DEPARTMENTS.map((dept) => (
+                  <option key={dept} value={dept}>
+                    {dept}
+                  </option>
+                ))}
+              </select>
             </div>
           </div>
 

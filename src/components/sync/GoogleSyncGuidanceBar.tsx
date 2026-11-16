@@ -4,6 +4,7 @@
  */
 
 import React, { useState } from 'react';
+import { AnimatePresence, motion } from 'motion/react';
 import { useApp } from '../../context/AppContext';
 import {
   Cloud,
@@ -41,7 +42,9 @@ export const GoogleSyncGuidanceBar: React.FC = () => {
     loginWithGoogle,
     logoutFromGoogle,
     syncNowToGoogleSheets,
+    pullFromSheetsAndDrive,
     isSyncingSheets,
+    isPullingFromCloud,
     syncSheetsError,
     lastSheetsSyncResult,
   } = useApp();
@@ -82,7 +85,17 @@ export const GoogleSyncGuidanceBar: React.FC = () => {
     const result = await syncNowToGoogleSheets();
     if (result && result.success) {
       setSyncSuccessToast(
-        `Đồng bộ lên Google Sheets thành công! (${result.rowCounts.receipts} PNK, ${result.rowCounts.issues} PXK, ${result.rowCounts.reports} báo cáo)`
+        `Đồng bộ lên Google Sheets (04 Sheet) thành công! (${result.rowCounts.receipts} PNK, ${result.rowCounts.issues} PXK, ${result.rowCounts.reports} báo cáo, ${result.rowCounts.accounts || 0} tài khoản)`
+      );
+      setTimeout(() => setSyncSuccessToast(null), 5000);
+    }
+  };
+
+  const handlePullFromCloud = async () => {
+    const res = await pullFromSheetsAndDrive(false);
+    if (res.success) {
+      setSyncSuccessToast(
+        `Đã tải ngược dữ liệu 2 chiều (${res.usersUpdated || 0} tài khoản${res.restoredFromDrive ? ' & kho từ Drive' : ''}).`
       );
       setTimeout(() => setSyncSuccessToast(null), 5000);
     }
@@ -164,6 +177,16 @@ export const GoogleSyncGuidanceBar: React.FC = () => {
             ) : (
               <>
                 <button
+                  onClick={handlePullFromCloud}
+                  disabled={isPullingFromCloud || isSyncingSheets}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-cyan-600/30 bg-cyan-50 hover:bg-cyan-100 text-cyan-900 text-xs font-semibold transition-colors disabled:opacity-50 whitespace-nowrap shrink-0"
+                  title="Tải ngược tài khoản và snapshot JSON từ Google Sheets & Drive"
+                >
+                  <Download className={`w-3.5 h-3.5 text-cyan-700 ${isPullingFromCloud ? 'animate-bounce' : ''}`} />
+                  <span>{isPullingFromCloud ? 'Đang tải về...' : 'Kéo về máy'}</span>
+                </button>
+
+                <button
                   onClick={handleRequestSync}
                   disabled={isSyncingSheets}
                   className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold shadow-xs transition-colors disabled:opacity-50 whitespace-nowrap shrink-0"
@@ -202,7 +225,7 @@ export const GoogleSyncGuidanceBar: React.FC = () => {
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-300 hover:bg-slate-100 text-slate-700 text-xs font-semibold transition-colors whitespace-nowrap shrink-0"
             >
               <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" />
-              <span>Xuất 03 Sheet (.xlsx)</span>
+              <span>Xuất 04 Sheet (.xlsx)</span>
             </button>
 
             {isGoogleAuthenticated && (
@@ -225,35 +248,61 @@ export const GoogleSyncGuidanceBar: React.FC = () => {
           </div>
         </div>
 
-        {syncSuccessToast && (
-          <div className="px-4 py-2 bg-emerald-700 text-white text-xs font-medium flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <CheckCircle2 className="w-4 h-4 text-emerald-200 shrink-0" />
-              <span>{syncSuccessToast}</span>
-            </div>
-            {currentSheetUrl && (
-              <a
-                href={currentSheetUrl}
-                target="_blank"
-                rel="noreferrer"
-                className="underline font-bold text-emerald-100 hover:text-white inline-flex items-center gap-1 ml-4"
-              >
-                <span>Mở Google Sheets</span>
-                <ExternalLink className="w-3 h-3" />
-              </a>
-            )}
-          </div>
-        )}
+        <AnimatePresence>
+          {syncSuccessToast && (
+            <motion.div
+              key="sync-toast"
+              initial={{ opacity: 0, y: -6 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -6 }}
+              transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+              className="px-4 py-2 bg-emerald-700 text-white text-xs font-medium flex items-center justify-between"
+            >
+              <div className="flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 text-emerald-200 shrink-0" />
+                <span>{syncSuccessToast}</span>
+              </div>
+              {currentSheetUrl && (
+                <a
+                  href={currentSheetUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="underline font-bold text-emerald-100 hover:text-white inline-flex items-center gap-1 ml-4"
+                >
+                  <span>Mở Google Sheets</span>
+                  <ExternalLink className="w-3 h-3" />
+                </a>
+              )}
+            </motion.div>
+          )}
+        </AnimatePresence>
 
-        {syncSheetsError && (
-          <div className="px-4 py-2 bg-rose-50 border-t border-rose-200 text-rose-800 text-xs font-medium flex items-center gap-2">
-            <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
-            <span>{syncSheetsError}</span>
-          </div>
-        )}
+        <AnimatePresence>
+          {syncSheetsError && (
+            <motion.div
+              key="sync-error"
+              initial={{ opacity: 0, y: -6 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -6 }}
+              transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+              className="px-4 py-2 bg-rose-50 border-t border-rose-200 text-rose-800 text-xs font-medium flex items-center gap-2"
+            >
+              <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+              <span>{syncSheetsError}</span>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
-        {isExpanded && (
-          <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 text-xs text-slate-600 grid grid-cols-1 md:grid-cols-3 gap-4">
+        <AnimatePresence>
+          {isExpanded && (
+            <motion.div
+              key="sync-expanded"
+              initial={{ opacity: 0, y: -8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -6 }}
+              transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+              className="px-4 py-3 bg-slate-50 border-t border-slate-200 text-xs text-slate-600 grid grid-cols-1 md:grid-cols-3 gap-4"
+            >
             <div className="space-y-1">
               <div className="font-semibold text-slate-800 flex items-center gap-1.5">
                 <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
@@ -301,8 +350,9 @@ export const GoogleSyncGuidanceBar: React.FC = () => {
                 Tổng cộng {backupLogs.length} lần ghi nhận
               </div>
             </div>
-          </div>
-        )}
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
 
       {/* Guidance Modal */}
@@ -367,15 +417,15 @@ export const GoogleSyncGuidanceBar: React.FC = () => {
                   1. Cơ Chế Kết Hợp Apps Script Bridge + Google OAuth
                 </h3>
                 <p className="text-teal-950/80 leading-relaxed">
-                  Khi Quản trị viên gắn URL Google Apps Script Web App trong phân hệ <strong>Đồng Bộ Sheets & Drive</strong>, mọi giao dịch nhập/xuất kho sẽ tự động đẩy lên 3 trang tính mà không bị chặn popup iFrame hay hết hạn token 60 phút.
+                  Khi Quản trị viên gắn URL Google Apps Script Web App trong phân hệ <strong>Đồng Bộ Sheets &amp; Drive</strong>, toàn bộ 04 trang tính (gồm tab Tài khoản) và snapshot JSON trên Google Drive sẽ tự động đồng bộ hai chiều mà không cần lưu dữ liệu vĩnh viễn tại trình duyệt.
                 </p>
               </div>
 
               <div className="p-4 rounded-xl bg-white border border-slate-200">
                 <h3 className="text-sm font-bold text-slate-900 mb-2">
-                  2. Cấu Trúc 03 Sheet Chuẩn (Mỗi Tên Đối Tượng Một Dòng)
+                  2. Cấu Trúc 04 Sheet Chuẩn Hai Chiều
                 </h3>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-2xs">
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 text-2xs">
                   <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 space-y-1.5">
                     <span className="font-bold text-teal-900 font-mono block border-b border-slate-200 pb-1">
                       1. Sheet "Phiếu nhập"
@@ -400,12 +450,20 @@ export const GoogleSyncGuidanceBar: React.FC = () => {
                       Tổng hợp Tồn đầu kỳ, Nhập trong kỳ, Tổng nhập, Xuất trong kỳ, Tồn cuối kỳ theo từng đối tượng BHYT.
                     </p>
                   </div>
+                  <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 space-y-1.5">
+                    <span className="font-bold text-cyan-900 font-mono block border-b border-slate-200 pb-1">
+                      4. Sheet "Tài khoản"
+                    </span>
+                    <p className="text-slate-600 leading-relaxed">
+                      Lưu trữ &amp; đồng bộ 2 chiều hồ sơ cán bộ, phòng ban, vai trò, trạng thái duyệt và mật khẩu đăng nhập.
+                    </p>
+                  </div>
                 </div>
               </div>
 
               <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 flex flex-col sm:flex-row items-center justify-between gap-3">
                 <div>
-                  <div className="font-bold text-slate-900">Tải Tệp Dữ Liệu 03 Sheet Thủ Công:</div>
+                  <div className="font-bold text-slate-900">Tải Tệp Dữ Liệu 04 Sheet Thủ Công:</div>
                   <div className="text-2xs text-slate-500 mt-0.5">
                     Hỗ trợ định dạng Excel (.XLSX) hoặc CSV chuẩn UTF-8.
                   </div>
@@ -419,7 +477,7 @@ export const GoogleSyncGuidanceBar: React.FC = () => {
                     className="px-3.5 py-2 border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 rounded-lg font-semibold text-xs flex items-center gap-1.5"
                   >
                     <Download className="w-3.5 h-3.5" />
-                    <span>Tải CSV (03 Sheet)</span>
+                    <span>Tải CSV (04 Sheet)</span>
                   </button>
                   <button
                     onClick={() => {
@@ -455,7 +513,7 @@ export const GoogleSyncGuidanceBar: React.FC = () => {
             <div>
               <div className="font-bold text-amber-900 mb-1">Xác nhận cập nhật dữ liệu Google Spreadsheet</div>
               <p className="leading-relaxed text-amber-800">
-                Hệ thống sẽ cập nhật đồng bộ 03 trang tính (<strong>Phiếu nhập</strong>, <strong>Phiếu xuất</strong>, <strong>Báo cáo</strong>) qua kênh{' '}
+                Hệ thống sẽ cập nhật đồng bộ 04 trang tính (<strong>Phiếu nhập</strong>, <strong>Phiếu xuất</strong>, <strong>Báo cáo</strong>, <strong>Tài khoản</strong>) cùng bản lưu JSON trên Google Drive qua kênh{' '}
                 <strong>{hasAppsScript ? 'Google Apps Script Bridge' : googleUser?.email || 'Google OAuth API'}</strong>.
               </p>
             </div>

@@ -4,184 +4,121 @@
  */
 
 export const BACKUP_GUIDE_MARKDOWN = `# TÀI LIỆU HƯỚNG DẪN CHI TIẾT
-# CẤU TRÚC SAO LƯU GOOGLE SHEETS TỐI ƯU 03 SHEET VÀ GOOGLE DRIVE
-### Hệ Thống Quản Lý Thuốc & Kho Dược - Trung Tâm Bảo Trợ Xã Hội Đà Nẵng
-*Bộ phận: Phòng Y Tế - Phục Hồi Chức Năng*  
+# CẤU TRÚC ĐỒNG BỘ HAI CHIỀU GOOGLE SHEETS 04 SHEET VÀ GOOGLE DRIVE
+### Hệ Thống Quản Lý Thuốc & Kho Dược - Sở Y tế thành phố Đà Nẵng
+*Đơn vị: Trung tâm Bảo trợ xã hội Đà Nẵng — Phòng Y Tế - Phục Hồi Chức Năng*  
 *Mã quan hệ ngân sách (Mã QHNS): 1041008*
 
 ---
 
 ## MỤC LỤC
-1. [Tổng quan nguyên lý tự động sao lưu](#1-tong-quan-nguyen-ly-tu-dong-sao-luu)
-2. [Cơ chế tự động sao lưu ngầm (Background Auto-Backup)](#2-co-che-tu-dong-sao-luu-ngam-background-auto-backup)
-3. [Cấu trúc tối ưu 03 Sheet trên Google Sheets (Mỗi đối tượng nằm trên một dòng)](#3-cau-truc-toi-uu-03-sheet-tren-google-sheets)
-4. [Hướng dẫn thao tác nhập (Import) tệp 03 Sheet vào Google Sheets](#4-huong-dan-thao-tac-nhap-import-tep-03-sheet-vao-google-sheets)
-5. [Cấu trúc cây thư mục lưu trữ chứng từ trên Google Drive](#5-cau-truc-cay-thu-muc-luu-tru-chung-tu-tren-google-drive)
+1. [Tổng quan nguyên lý đồng bộ hai chiều (Google Sheets & Drive)](#1-tong-quan-nguyen-ly-dong-bo-hai-chieu)
+2. [Cơ chế bảo mật phiên & đồng bộ ngầm (Không lưu dữ liệu lâu dài tại trình duyệt)](#2-co-che-bao-mat-phien-va-dong-bo-ngam)
+3. [Cấu trúc tối ưu 04 Sheet trên Google Sheets](#3-cau-truc-toi-uu-04-sheet-tren-google-sheets)
+4. [Hướng dẫn thao tác nhập / tải tệp 04 Sheet (.xlsx / .csv)](#4-huong-dan-thao-tac-nhap-tep-04-sheet)
+5. [Cấu trúc cây thư mục lưu trữ chứng từ & Snapshot JSON trên Google Drive](#5-cau-truc-cay-thu-muc-luu-tru-google-drive)
 6. [Quy trình in và lưu trữ chứng từ PDF lên Google Drive](#6-quy-trinh-in-va-luu-tru-chung-tu-pdf-len-google-drive)
-7. [Quy trình đối soát số liệu và phục hồi khi có sự cố](#7-quy-trinh-doi-soat-so-lieu-va-phuc-hoi-khi-co-su-co)
-8. [Các lưu ý nghiệp vụ đặc thù (Bỏ HSD, nhập tự do tên đối tượng, người ký)](#8-cac-luu-y-nghiep-vu-dac-thu)
+7. [Quy trình đồng bộ ngược & phục hồi từ Sheet Tài khoản / Drive JSON](#7-quy-trinh-dong-bo-nguoc-va-phuc-hoi)
+8. [Các lưu ý nghiệp vụ đặc thù (Quyền sở hữu phiếu, Phòng ban đăng ký, Mẫu BTC)](#8-cac-luu-y-nghiep-vu-dac-thu)
 
 ---
 
-## 1. TỔNG QUAN NGUYÊN LÝ TỰ ĐỘNG SAO LƯU
+## 1. TỔNG QUAN NGUYÊN LÝ ĐỒNG BỘ HAI CHIỀU
 
-Hệ thống quản lý thuốc của Trung tâm Bảo trợ xã hội Đà Nẵng vận hành theo nguyên tắc:
-- **Nhập liệu một lần - Dữ liệu kế thừa xuyên suốt**: Cán bộ y tế chỉ cần thao tác trực tiếp trên các biểu mẫu Phiếu Nhập, Phiếu Xuất và Báo Cáo.
-- **Tối ưu hóa cấu trúc sao lưu Google Sheets**: Dữ liệu sao lưu được tổ chức thành đúng **03 Sheet** tương ứng với 3 phân hệ nghiệp vụ cốt lõi:
+Hệ thống quản lý thuốc của Trung tâm Bảo trợ xã hội Đà Nẵng (trực thuộc Sở Y tế thành phố Đà Nẵng) vận hành theo nguyên tắc:
+- **Lưu trữ tập trung trên Google Cloud**: Dữ liệu hoạt động chỉ lưu tạm trong bộ nhớ phiên làm việc hiện tại (\`sessionStorage\`) và được đồng bộ hai chiều trực tiếp lên Google Sheets & Google Drive (\`btxh_pharmacy_state.json\`).
+- **Tối ưu hóa cấu trúc Google Sheets**: Tổ chức thành đúng **04 Sheet** chuẩn hóa:
   1. **Sheet "Phiếu nhập"**: Theo dõi toàn bộ thuốc nhập kho gom nhóm theo từng đối tượng nuôi dưỡng / đối tượng hưởng.
   2. **Sheet "Phiếu xuất"**: Theo dõi toàn bộ thuốc đã xuất kho / cấp phát gom nhóm theo từng đối tượng.
   3. **Sheet "Báo cáo"**: Bảng tổng hợp nhập, xuất, tồn thuốc mua ngoài cho đối tượng có bảo hiểm y tế (BHYT).
-- **Quy chuẩn hiển thị**: **Tại mỗi sheet, mỗi tên đối tượng sẽ nằm trên một dòng riêng biệt**, kèm dòng tổng cộng toàn đơn vị ở cuối bảng.
+  4. **Sheet "Tài khoản"**: Lưu trữ và đồng bộ hai chiều danh sách cán bộ, email, phòng ban, vai trò, trạng thái duyệt và mật khẩu.
 
 ---
 
-## 2. CƠ CHẾ TỰ ĐỘNG SAO LƯU NGẦM (BACKGROUND AUTO-BACKUP)
+## 2. CƠ CHẾ BẢO MẬT PHIÊN VÀ ĐỒNG BỘ NGẦM
 
-### 2.1. Tự động hóa hoàn toàn
-Hệ thống ngầm sao lưu ngay lập tức khi phát sinh bất kỳ thao tác:
-- Lập mới, cập nhật, điều chỉnh hoặc xóa **Phiếu nhập kho**.
-- Lập mới, cập nhật, điều chỉnh hoặc xóa **Phiếu xuất kho**.
-- Lập hoặc tính toán lại **Bảng tổng hợp đối tượng BHYT**.
-- Hiệu chỉnh thông số cơ quan, mã QHNS hoặc 5 chức danh ký duyệt.
+### 2.1. Đăng xuất tự động & bảo vệ phiên làm việc
+- Khi mở ứng dụng ở phiên làm việc mới, hệ thống yêu cầu xác thực tài khoản trước khi truy cập kho dữ liệu.
+- Nếu không phát sinh thao tác trên hệ thống trong vòng **60 phút (01 giờ)**, phiên làm việc tự động kết thúc và quay về màn hình đăng nhập.
 
-### 2.2. Giám sát trạng thái trực quan
-- Thanh công cụ đầu trang hiển thị chấm xanh nhấp nháy: **"Đang hoạt động tự động"**.
-- Hiển thị nội dung thao tác vừa được sao lưu và mốc thời gian chính xác đến từng giây.
-- Cho phép người dùng bấm **"Sao lưu ngay"** để chốt số liệu tức thì.
+### 2.2. Tự động đồng bộ hai chiều qua Google Apps Script Bridge
+Khi Quản trị viên gắn URL Google Apps Script Web App:
+- Mọi thay đổi phát sinh ở **Phiếu nhập kho**, **Phiếu xuất kho**, **Quản trị tài khoản (Tạo/Sửa/Duyệt/Khóa)** hoặc **Cấu hình biểu mẫu** tự động đẩy lên 04 Sheet và tệp \`btxh_pharmacy_state.json\` trên Google Drive.
+- Trước khi đăng nhập hoặc khi bấm **Kéo Dữ Liệu Hai Chiều Về Máy**, ứng dụng đọc lại danh sách tài khoản từ tab **Tài khoản** và toàn bộ trạng thái kho từ Google Drive JSON.
 
 ---
 
-## 3. CẤU TRÚC TỐI ƯU 03 SHEET TRÊN GOOGLE SHEETS
-*(Đặc tả chi tiết: Tại mỗi sheet, mỗi tên đối tượng sẽ nằm trên một dòng)*
+## 3. CẤU TRÚC TỐI ƯU 04 SHEET TRÊN GOOGLE SHEETS
 
 ### 3.1. SHEET 1: "Phiếu nhập"
-Mỗi dòng là một đối tượng hưởng thuốc nhập kho:
-
-- Cột 1: STT (Số thứ tự dòng đối tượng)
-- Cột 2: Họ và tên đối tượng (Mỗi tên đối tượng nằm trên một dòng riêng biệt)
-- Cột 3: Mã số / Số thẻ BHYT (Mã số hồ sơ nội bộ hoặc mã thẻ BHYT)
-- Cột 4: Khu phòng / Nơi ở (Khu nuôi dưỡng, điều trị hoặc phòng lưu trú)
-- Cột 5: Số phiếu nhập kho (Danh sách các số phiếu nhập liên quan PNK-...)
-- Cột 6: Ngày nhập (Các ngày phát sinh giao dịch nhập kho)
-- Cột 7: Người giao / Nhà cung cấp (Tên người giao hàng hoặc công ty dược cung ứng)
-- Cột 8: Số hóa đơn chứng từ (Số hóa đơn tài chính và ngày lập hóa đơn mua ngoài)
-- Cột 9: Danh mục thuốc & Số lượng nhập (Chi tiết tên thuốc, số lô và số lượng đã nhập)
-- Cột 10: Tổng số lượng nhập (Tổng số đơn vị viên/lọ/gói thực nhập cho đối tượng)
-- Cột 11: Tổng tiền nhập kho VNĐ (Tổng giá trị bằng tiền thuốc đã mua ngoài nhập kho)
-- Cột 12: Ghi chú nghiệp vụ (Đánh giá tình trạng chứng từ)
-*Dòng cuối cùng: TỔNG CỘNG TẤT CẢ ĐỐI TƯỢNG tổng hợp toàn bộ số lượng và số tiền.*
-
----
+Mỗi dòng là một đối tượng hưởng thuốc nhập kho gồm: STT, Họ tên đối tượng, Mã/Thẻ BHYT, Khu phòng, Số PNK, Ngày nhập, Nhà cung cấp, Hóa đơn, Danh mục thuốc & số lượng, Tổng SL nhập, Tổng tiền VNĐ, Ghi chú.
 
 ### 3.2. SHEET 2: "Phiếu xuất"
-Mỗi dòng là một đối tượng hưởng thuốc xuất kho / cấp phát:
-
-- Cột 1: STT (Số thứ tự dòng đối tượng)
-- Cột 2: Họ và tên đối tượng (Mỗi tên đối tượng nằm trên một dòng riêng biệt)
-- Cột 3: Mã số / Số thẻ BHYT (Mã số quản lý hoặc số thẻ BHYT)
-- Cột 4: Khu phòng điều trị (Khu phòng sử dụng thuốc thực tế)
-- Cột 5: Số phiếu xuất kho (Danh sách các số phiếu xuất liên quan PXK-...)
-- Cột 6: Ngày xuất kho (Các ngày cấp phát, xuất thuốc)
-- Cột 7: Người nhận thuốc (Cán bộ y tế phụ trách nhận hoặc người bệnh)
-- Cột 8: Lý do xuất thuốc (Điều trị định kỳ, cấp phát ngoại trú,...)
-- Cột 9: Danh mục thuốc & Số lượng xuất (Chi tiết tên thuốc, số lô và số lượng đã xuất)
-- Cột 10: Tổng số lượng xuất (Tổng số đơn vị thuốc đã cấp cho đối tượng)
-- Cột 11: Tổng giá trị xuất kho VNĐ (Tổng giá trị tiền thuốc đã xuất)
-- Cột 12: Trạng thái chứng từ (Tình trạng cấp phát thực tế)
-*Dòng cuối cùng: TỔNG CỘNG TẤT CẢ ĐỐI TƯỢNG tổng hợp toàn bộ số lượng và số tiền.*
-
----
+Mỗi dòng là một đối tượng nhận thuốc xuất kho gồm: STT, Họ tên đối tượng, Mã/Thẻ BHYT, Khu phòng điều trị, Số PXK, Ngày xuất, Người nhận, Lý do xuất, Danh mục thuốc & số lượng, Tổng SL xuất, Tổng giá trị VNĐ, Trạng thái.
 
 ### 3.3. SHEET 3: "Báo cáo"
 *(BẢNG TỔNG HỢP NHẬP, XUẤT THUỐC MUA NGOÀI CHO ĐỐI TƯỢNG CÓ BẢO HIỂM Y TẾ)*
-Mỗi dòng là một đối tượng, thể hiện xuyên suốt chu trình Tồn đầu - Nhập - Xuất - Tồn cuối:
+Gồm 16 cột chuẩn: STT, Họ tên đối tượng, Mã thẻ BHYT, Khu phòng, Danh mục thuốc theo dõi, Tồn đầu kỳ (SL, Tiền), Nhập trong kỳ (SL, Tiền), Tổng nhập (SL, Tiền), Xuất trong kỳ (SL, Tiền), Tồn cuối kỳ (SL, Tiền), Ghi chú.
 
-- Cột 1: STT
-- Cột 2: Họ và tên đối tượng (Mỗi tên đối tượng nằm trên một dòng riêng biệt)
-- Cột 3: Mã thẻ BHYT (Số thẻ BHYT phục vụ thanh quyết toán)
-- Cột 4: Khu phòng (Khu phòng quản lý)
-- Cột 5: Danh mục thuốc theo dõi (Các loại thuốc đối tượng đang sử dụng)
-- Cột 6: Tồn đầu kỳ - Số lượng
-- Cột 7: Tồn đầu kỳ - Thành tiền VNĐ
-- Cột 8: Nhập trong kỳ - Số lượng
-- Cột 9: Nhập trong kỳ - Thành tiền VNĐ
-- Cột 10: Tổng nhập - Số lượng (= Tồn đầu kỳ + Nhập trong kỳ)
-- Cột 11: Tổng nhập - Thành tiền VNĐ (= Tiền tồn đầu kỳ + Tiền nhập trong kỳ)
-- Cột 12: Xuất trong kỳ - Số lượng
-- Cột 13: Xuất trong kỳ - Thành tiền VNĐ
-- Cột 14: Tồn cuối kỳ - Số lượng (= Tổng nhập - Xuất trong kỳ)
-- Cột 15: Tồn cuối kỳ - Thành tiền VNĐ (= Tiền tổng nhập - Tiền xuất trong kỳ)
-- Cột 16: Ghi chú / Tình trạng (Đánh giá tồn tủ thuốc đối tượng)
-*Dòng cuối cùng: TỔNG CỘNG TẤT CẢ ĐỐI TƯỢNG cân đối toàn diện số liệu.*
+### 3.4. SHEET 4: "Tài khoản"
+Đồng bộ hai chiều thông tin hồ sơ tài khoản hệ thống:
+- Cột 1: Mã tài khoản (ID)
+- Cột 2: Họ và tên cán bộ
+- Cột 3: Email đăng nhập
+- Cột 4: Số điện thoại
+- Cột 5: Phòng ban / Đơn vị (Phòng Y tế - Phục hồi chức năng / Phòng CTXH&CSND / Phòng TH-HC-KT)
+- Cột 6: Vai trò nghiệp vụ (ADMIN / PHARMACIST / DOCTOR / ACCOUNTANT / LEADER)
+- Cột 7: Trạng thái (ACTIVE / PENDING_APPROVAL / LOCKED / DISABLED / REJECTED)
+- Cột 8: Mật khẩu
+- Cột 9: Ngày tạo
+- Cột 10: Người phê duyệt & ngày duyệt
 
 ---
 
-## 4. HƯỚNG DẪN THAO TÁC NHẬP (IMPORT) TỆP 03 SHEET VÀO GOOGLE SHEETS
+## 4. HƯỚNG DẪN THAO TÁC NHẬP TỆP 04 SHEET
 
 Hệ thống cung cấp 2 định dạng tải về tiện lợi:
-1. **Định dạng Excel đa trang tính (.xlsx)**: Tải về và mở trực tiếp trên Google Sheets, lập tức nhận diện đúng 3 tab: Phiếu nhập, Phiếu xuất, Báo cáo.
-2. **Định dạng CSV chuẩn UTF-8 (.csv)**: Phân cách rõ ràng 3 phân hệ bằng tiêu đề bảng.
-
-### Các bước mở trên Google Sheets:
-- **Cách 1: Mở trực tiếp file Excel (.xlsx)**:
-  1. Bấm nút "Xuất Google Sheets (03 Sheet)" trên thanh tác vụ của ứng dụng để tải file .xlsx.
-  2. Truy cập Google Drive (drive.google.com), kéo thả file .xlsx vào Drive.
-  3. Nhấp đúp vào file để mở trực tiếp dưới dạng Google Sheets với đầy đủ 3 trang tính riêng biệt.
-- **Cách 2: Nhập vào bảng tính hiện có (Import)**:
-  1. Trong Google Sheets, chọn Tệp (File) > Nhập (Import).
-  2. Chọn thẻ Tải lên (Upload) và chọn file đã tải về.
-  3. Chọn Thay thế bảng tính hiện tại và bấm Nhập dữ liệu.
+1. **Định dạng Excel đa trang tính (.xlsx)**: Mở trực tiếp trên Google Sheets nhận diện đủ 4 tab: Phiếu nhập, Phiếu xuất, Báo cáo, Tài khoản.
+2. **Định dạng CSV chuẩn UTF-8 (.csv)**: Phân cách rõ ràng 4 phân hệ bằng tiêu đề bảng.
 
 ---
 
-## 5. CẤU TRÚC CÂY THƯ MỤC LƯU TRỮ CHỨNG TỪ TRÊN GOOGLE DRIVE
+## 5. CẤU TRÚC CÂY THƯ MỤC LƯU TRỮ GOOGLE DRIVE
 
+\`\`\`text
 QUAN_LY_THUOC_TRUNG_TAM/
-├── 2026/
-│   ├── PHIEU_NHAP/ (PNK-20261002-001.pdf)
-│   ├── PHIEU_XUAT/ (PXK-20261005-001.pdf)
-│   └── BAO_CAO/    (BaoCao_BHYT_NguyenVanAn_202610.pdf)
-└── 2027/
-    ├── PHIEU_NHAP/
-    ├── PHIEU_XUAT/
-    └── BAO_CAO/
+├── btxh_pharmacy_state.json    (Bản sao lưu toàn vẹn trạng thái hệ thống 2 chiều)
+└── 2026/
+    ├── PHIEU_NHAP/ (PNK-20261002-001.pdf)
+    ├── PHIEU_XUAT/ (PXK-20261005-001.pdf)
+    └── BAO_CAO/    (BaoCao_BHYT_NguyenVanAn_202610.pdf)
+\`\`\`
 
 ---
 
 ## 6. QUY TRÌNH IN VÀ LƯU TRỮ CHỨNG TỪ PDF LÊN GOOGLE DRIVE
 
 1. Tại màn hình Phiếu Nhập, Phiếu Xuất hoặc Báo Cáo, nhấp nút In chứng từ.
-2. Kiểm tra thông tin hành chính được tự động điền:
-   - Tên đơn vị: Trung tâm Bảo trợ xã hội Đà Nẵng
-   - Bộ phận: Phòng Y tế - PHCN
-   - Mã QHNS: 1041008
-   - Bảng kê số lô, số lượng, đơn giá, thành tiền (đã loại bỏ cột Hạn sử dụng).
-   - Tổng tiền bằng chữ và 5 khung chữ ký thẩm quyền.
-3. Chọn máy in là "Lưu dưới dạng PDF" (Save as PDF) và tải file lên thư mục Google Drive tương ứng theo năm.
+2. Kiểm tra tiêu ngữ cơ quan chủ quản: **Sở Y tế thành phố Đà Nẵng — Trung tâm Bảo trợ xã hội Đà Nẵng — Phòng Y tế - PHCN (Mã QHNS: 1041008)**.
+3. Chọn máy in "Lưu dưới dạng PDF" hoặc bấm đồng bộ để tải lên Google Drive.
 
 ---
 
-## 7. QUY TRÌNH ĐỐI SOÁT SỐ LIỆU VÀ PHỤC HỒI KHI CÓ SỰ CỐ
+## 7. QUY TRÌNH ĐỒNG BỘ NGƯỢC & PHỤC HỒI
 
-### 7.1. Công thức cân đối kế toán kho dược
-Tại mọi thời điểm và trên từng dòng của mỗi đối tượng:
-- Tồn cuối kỳ = Tồn đầu kỳ + Nhập trong kỳ - Xuất trong kỳ
-- Tổng nhập = Tồn đầu kỳ + Nhập trong kỳ
-- Tiền tồn cuối = Tiền tổng nhập - Tiền xuất trong kỳ
-
-### 7.2. Phục hồi dữ liệu
-Khi đổi thiết bị làm việc, mở file Google Sheets sao lưu gần nhất để đối chiếu số liệu và rà soát lại các phiếu nhập/xuất đã lập.
+- **Phục hồi tự động khi mở phiên mới**: Ứng dụng đọc tự động từ Google Sheets (tab Tài khoản) & tệp \`btxh_pharmacy_state.json\` trên Google Drive nếu đã gắn Apps Script Web App URL.
+- **Công thức cân đối**: Tồn cuối kỳ = Tồn đầu kỳ + Nhập trong kỳ - Xuất trong kỳ.
 
 ---
 
 ## 8. CÁC LƯU Ý NGHIỆP VỤ ĐẶC THÙ
 
-1. **Bỏ nội dung Hạn dùng (HSD)**: Mọi bảng tính trên Google Sheets, biểu mẫu nhập/xuất và bản in chứng từ đều không còn cột Hạn dùng, chỉ quản lý theo Số lô thuốc.
-2. **Cho phép tự do gõ tên đối tượng**: Cán bộ có thể chọn từ danh sách đối tượng nuôi dưỡng hoặc tự gõ tên đối tượng mới; hệ thống đều tự động cấp phát dòng riêng cho đối tượng đó trên cả 3 sheet.
-3. **Hiệu chỉnh thông tin mặc định**: Tại menu "Cấu Hình Mặc Định", người dùng có thể tùy biến tên cơ quan, bộ phận, mã QHNS và họ tên của 5 vị trí ký duyệt bất cứ lúc nào.
+1. **Quyền sở hữu chứng từ**: Chỉ tài khoản tạo ra phiếu nhập/phiếu xuất đó (hoặc Quản trị viên ADMIN) mới được chỉnh sửa hoặc xóa nội dung phiếu.
+2. **Phòng ban đăng ký tài khoản**: Chỉ bao gồm 03 phòng chính thức: *Phòng Y tế - Phục hồi chức năng*, *Phòng CTXH&CSND*, *Phòng TH-HC-KT*.
+3. **Không lưu dữ liệu tồn đọng trên ổ cứng trình duyệt**: Khi kết thúc phiên hoặc đóng trình duyệt, phiên đăng nhập tự hủy; dữ liệu chính thức luôn nằm trên Google Sheets và Google Drive.
 
 ---
-Hệ Thống Quản Lý Thuốc & Kho Dược - Trung Tâm Bảo Trợ Xã Hội Đà Nẵng
+Hệ Thống Quản Lý Thuốc & Kho Dược — Sở Y tế thành phố Đà Nẵng / Trung Tâm Bảo Trợ Xã Hội Đà Nẵng
 `;
 
 /**
@@ -194,7 +131,7 @@ export const downloadBackupGuideFile = () => {
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.setAttribute('href', url);
-  link.setAttribute('download', 'HUONG_DAN_CHI_TIET_SAO_LUU_GOOGLE_SHEET_VA_DRIVE.md');
+  link.setAttribute('download', 'HUONG_DAN_DONG_BO_4_SHEET_VA_GOOGLE_DRIVE.md');
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);

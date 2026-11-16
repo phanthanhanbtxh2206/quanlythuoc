@@ -356,11 +356,35 @@ export interface DriveSyncedFile {
 
 export type GoogleSyncMode = 'HYBRID' | 'APPS_SCRIPT' | 'OAUTH';
 
+export const REGISTRATION_DEPARTMENTS = [
+  'Phòng Y tế - Phục hồi chức năng',
+  'Phòng CTXH&CSND',
+  'Phòng TH-HC-KT',
+] as const;
+
+export type RegistrationDepartment = (typeof REGISTRATION_DEPARTMENTS)[number];
+
+export interface CloudStateSnapshot {
+  version: number;
+  updatedAt: string;
+  updatedBy?: string;
+  users: User[];
+  beneficiaries: Beneficiary[];
+  medicines: Medicine[];
+  receipts: StockReceipt[];
+  issues: StockIssue[];
+  prescriptions: Prescription[];
+  transactions: StockTransaction[];
+  auditLogs: AuditLog[];
+  syncedFiles: DriveSyncedFile[];
+  templateSettings: Partial<TemplateSettings>;
+}
+
 export interface TemplateSettings {
   // 1. Quốc hiệu, Tiêu ngữ & Đơn vị hành chính chung
   nationalMottoTop: string; // CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM
   nationalMottoSub: string; // Độc lập - Tự do - Hạnh phúc
-  parentOrg: string; // SỞ LAO ĐỘNG - THƯƠNG BINH VÀ XÃ HỘI TP ĐÀ NẴNG
+  parentOrg: string; // SỞ Y TẾ THÀNH PHỐ ĐÀ NẴNG
   agencyName: string; // TRUNG TÂM BẢO TRỢ XÃ HỘI
   deptName: string; // PHÒNG Y TẾ - PHCN
   qhnsCode: string; // 1041008
@@ -468,7 +492,7 @@ export interface TemplateSettings {
 export const DEFAULT_TEMPLATE_SETTINGS: TemplateSettings = {
   nationalMottoTop: 'CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM',
   nationalMottoSub: 'Độc lập - Tự do - Hạnh phúc',
-  parentOrg: 'SỞ LAO ĐỘNG - THƯƠNG BINH VÀ XÃ HỘI TP ĐÀ NẴNG',
+  parentOrg: 'SỞ Y TẾ THÀNH PHỐ ĐÀ NẴNG',
   agencyName: 'TRUNG TÂM BẢO TRỢ XÃ HỘI',
   deptName: 'PHÒNG Y TẾ - PHCN',
   qhnsCode: '1041008',

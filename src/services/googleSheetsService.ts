@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Beneficiary, StockReceipt, StockIssue, Medicine, StockTransaction, TemplateSettings } from '../types';
-import { buildThreeSheetsBeneficiaryData } from '../utils/googleSheetsBackup';
+import { Beneficiary, StockReceipt, StockIssue, Medicine, StockTransaction, TemplateSettings, User } from '../types';
+import { buildFourSheetsData } from '../utils/googleSheetsBackup';
 
 export interface GoogleSheetsSyncResult {
   success: boolean;
@@ -12,10 +12,13 @@ export interface GoogleSheetsSyncResult {
   spreadsheetUrl: string;
   timestamp: string;
   channel?: 'APPS_SCRIPT' | 'OAUTH';
+  driveStateFileId?: string;
+  driveStateWebViewLink?: string;
   rowCounts: {
     receipts: number;
     issues: number;
     reports: number;
+    accounts?: number;
   };
   error?: string;
 }
@@ -97,8 +100,8 @@ export const ensurePharmacySpreadsheet = async (
         (s: any) => s.properties?.title
       );
 
-      // Ensure all 3 required sheets exist
-      const requiredSheets = ['Phiếu nhập', 'Phiếu xuất', 'Báo cáo'];
+      // Ensure all 4 required sheets exist
+      const requiredSheets = ['Phiếu nhập', 'Phiếu xuất', 'Báo cáo', 'Tài khoản'];
       const missingSheets = requiredSheets.filter((s) => !existingSheetTitles.includes(s));
 
       if (missingSheets.length > 0) {
@@ -175,6 +178,12 @@ export const ensurePharmacySpreadsheet = async (
           gridProperties: { frozenRowCount: 1 },
         },
       },
+      {
+        properties: {
+          title: 'Tài khoản',
+          gridProperties: { frozenRowCount: 1 },
+        },
+      },
     ],
   };
 
@@ -205,7 +214,7 @@ export const ensurePharmacySpreadsheet = async (
 };
 
 /**
- * Automatically synchronize all pharmacy data to Google Sheets across 3 sheets via OAuth token.
+ * Automatically synchronize all pharmacy data + accounts across 4 sheets via OAuth token.
  */
 export const syncAllDataToGoogleSheets = async (
   accessToken: string,
@@ -214,20 +223,23 @@ export const syncAllDataToGoogleSheets = async (
   issues: StockIssue[],
   medicines: Medicine[],
   transactions: StockTransaction[],
-  templateSettings: TemplateSettings
+  templateSettings: TemplateSettings,
+  users: User[] = []
 ): Promise<GoogleSheetsSyncResult> => {
-  // 1. Generate structured 3-sheet rows
-  const { receiptSheetRows, issueSheetRows, reportSheetRows } = buildThreeSheetsBeneficiaryData(
+  // 1. Generate structured 4-sheet rows
+  const { receiptSheetRows, issueSheetRows, reportSheetRows, accountSheetRows } = buildFourSheetsData(
     beneficiaries,
     receipts,
     issues,
     medicines,
-    transactions
+    transactions,
+    users
   );
 
   const receiptValues = jsonTo2DArray(receiptSheetRows);
   const issueValues = jsonTo2DArray(issueSheetRows);
   const reportValues = jsonTo2DArray(reportSheetRows);
+  const accountValues = jsonTo2DArray(accountSheetRows);
 
   // 2. Resolve target spreadsheet ID from either googleSpreadsheetId or pasted googleSheetUrl
   const resolvedExistingId =
@@ -239,7 +251,7 @@ export const syncAllDataToGoogleSheets = async (
   const spreadsheetId = spreadsheet.id;
 
   // 3. Clear existing values to prevent stale trailing cells
-  const sheetsToClear = ["'Phiếu nhập'", "'Phiếu xuất'", "'Báo cáo'"];
+  const sheetsToClear = ["'Phiếu nhập'", "'Phiếu xuất'", "'Báo cáo'", "'Tài khoản'"];
   await Promise.all(
     sheetsToClear.map((sName) =>
       fetch(
@@ -257,7 +269,7 @@ export const syncAllDataToGoogleSheets = async (
     )
   );
 
-  // 4. Batch update values for all 3 sheets simultaneously
+  // 4. Batch update values for all 4 sheets simultaneously
   const updatePayload = {
     valueInputOption: 'USER_ENTERED',
     data: [
@@ -273,6 +285,14 @@ export const syncAllDataToGoogleSheets = async (
         range: "'Báo cáo'!A1",
         values: reportValues,
       },
+      ...(accountValues.length > 0
+        ? [
+            {
+              range: "'Tài khoản'!A1",
+              values: accountValues,
+            },
+          ]
+        : []),
     ],
   };
 
@@ -308,6 +328,29 @@ export const syncAllDataToGoogleSheets = async (
       receipts: Math.max(0, receiptValues.length - 1),
       issues: Math.max(0, issueValues.length - 1),
       reports: Math.max(0, reportValues.length - 1),
+      accounts: Math.max(0, accountValues.length - 1),
     },
   };
+};
+
+/**
+ * Read back rows from tab "Tài khoản" via Google Sheets API v4 (two-way pull)
+ */
+export const readAccountSheetViaOAuth = async (
+  accessToken: string,
+  spreadsheetId: string
+): Promise<any[][]> => {
+  const cleanId = extractSpreadsheetId(spreadsheetId);
+  if (!cleanId) return [];
+  const res = await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${cleanId}/values/${encodeURIComponent("'Tài khoản'!A1:L500")}`,
+    {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    }
+  );
+  if (!res.ok) return [];
+  const data = await res.json();
+  return Array.isArray(data.values) ? data.values : [];
 };

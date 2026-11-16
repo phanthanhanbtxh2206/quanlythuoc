@@ -976,7 +976,7 @@ export const TemplateSettingsView: React.FC = () => {
                       <h3 className="text-sm font-bold text-teal-900">Tài Liệu Hướng Dẫn Sao Lưu & Khôi Phục (.MD)</h3>
                     </div>
                     <p className="text-xs text-teal-950/80">
-                      Mô tả cấu trúc 03 Sheet trên Google Sheets (1 đối tượng / 1 dòng), sơ đồ lưu trữ Google Drive và quy trình phục hồi dữ liệu.
+                      Mô tả cấu trúc 04 Sheet trên Google Sheets (gồm tab Tài khoản đồng bộ 2 chiều), sơ đồ lưu trữ Google Drive JSON và quy trình phục hồi dữ liệu.
                     </p>
                   </div>
                   <button

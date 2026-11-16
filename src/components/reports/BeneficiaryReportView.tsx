@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useApp } from '../../context/AppContext';
 import { PrintModal, PrintDocumentType } from '../print/PrintModal';
 import { BeneficiaryReportRow } from '../../types';
@@ -19,11 +19,22 @@ import {
   RotateCcw,
   Plus,
   Trash2,
-  Save,
   Sparkles,
   ExternalLink,
+  Search,
+  ChevronDown,
+  X,
 } from 'lucide-react';
-import { formatCurrency, formatNumber, formatDate } from '../../utils/formatters';
+import { formatNumber, formatDate } from '../../utils/formatters';
+
+const normalizeVi = (str: string): string =>
+  (str || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/đ/g, 'd')
+    .replace(/Đ/g, 'D')
+    .toLowerCase()
+    .trim();
 
 interface BeneficiaryReportViewProps {
   initialBeneficiaryId?: string;
@@ -109,6 +120,12 @@ export const BeneficiaryReportView: React.FC<BeneficiaryReportViewProps> = ({ in
     return '';
   });
 
+  // Searchable combobox state
+  const [benSearchInput, setBenSearchInput] = useState('');
+  const [isBenDropdownOpen, setIsBenDropdownOpen] = useState(false);
+  const [isFilteringBen, setIsFilteringBen] = useState(false);
+  const benDropdownRef = useRef<HTMLDivElement>(null);
+
   // Tự động gán mặc định đối tượng đầu tiên từ danh sách phiếu nhập nếu chưa chọn
   useEffect(() => {
     if (!selectedBenId) {
@@ -119,6 +136,18 @@ export const BeneficiaryReportView: React.FC<BeneficiaryReportViewProps> = ({ in
       }
     }
   }, [selectedBenId, receiptBeneficiaries, beneficiaries]);
+
+  // Close beneficiary dropdown on outside click
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (benDropdownRef.current && !benDropdownRef.current.contains(event.target as Node)) {
+        setIsBenDropdownOpen(false);
+        setIsFilteringBen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
 
   // Tìm đối tượng được chọn từ danh sách đối tượng phiếu nhập trước hoặc danh mục
   const currentBeneficiary = useMemo(() => {
@@ -174,6 +203,49 @@ export const BeneficiaryReportView: React.FC<BeneficiaryReportViewProps> = ({ in
       isFromReceipt: false,
     };
   }, [selectedBenId, receiptBeneficiaries, beneficiaries]);
+
+  // Keep visible search input synced with currently active beneficiary when not actively typing
+  useEffect(() => {
+    if (!isFilteringBen && currentBeneficiary?.name) {
+      setBenSearchInput(currentBeneficiary.name);
+    }
+  }, [currentBeneficiary?.name, isFilteringBen]);
+
+  const activeQuery = isFilteringBen ? normalizeVi(benSearchInput) : '';
+
+  const filteredReceiptBeneficiaries = useMemo(() => {
+    if (!activeQuery) return receiptBeneficiaries;
+    return receiptBeneficiaries.filter((rb) => {
+      const haystack = normalizeVi(
+        `${rb.name} ${rb.code} ${rb.insuranceNumber} ${rb.roomArea} ${rb.receiptCodes.join(' ')}`
+      );
+      return haystack.includes(activeQuery);
+    });
+  }, [receiptBeneficiaries, activeQuery]);
+
+  const filteredOtherBeneficiaries = useMemo(() => {
+    if (!activeQuery) return otherBeneficiaries;
+    return otherBeneficiaries.filter((b) => {
+      const haystack = normalizeVi(`${b.fullName} ${b.code} ${b.insuranceNumber || ''} ${b.roomArea}`);
+      return haystack.includes(activeQuery);
+    });
+  }, [otherBeneficiaries, activeQuery]);
+
+  const hasExactBenMatch = useMemo(() => {
+    const cleanTyped = normalizeVi(benSearchInput);
+    if (!cleanTyped) return true;
+    return (
+      receiptBeneficiaries.some((rb) => normalizeVi(rb.name) === cleanTyped) ||
+      otherBeneficiaries.some((b) => normalizeVi(b.fullName) === cleanTyped)
+    );
+  }, [benSearchInput, receiptBeneficiaries, otherBeneficiaries]);
+
+  const handleSelectBeneficiary = (id: string, displayName: string) => {
+    setSelectedBenId(id);
+    setBenSearchInput(displayName);
+    setIsFilteringBen(false);
+    setIsBenDropdownOpen(false);
+  };
 
   // Thu thập toàn bộ ngày phát sinh chứng từ của đối tượng này
   const benActivityDates = useMemo(() => {
@@ -503,158 +575,302 @@ export const BeneficiaryReportView: React.FC<BeneficiaryReportViewProps> = ({ in
 
   return (
     <div className="space-y-4">
-      {/* Parameter Selection Ribbon */}
-      <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-2xs flex flex-col md:flex-row items-center justify-between gap-4">
-        <div className="flex flex-wrap items-center gap-3 w-full md:w-auto">
-          {/* Beneficiary Picker */}
-          <div>
-            <label className="block text-2xs font-semibold text-slate-500 mb-0.5">
-              Chọn đối tượng xuất báo cáo (Theo tên ở Phiếu Nhập):
+      {/* Parameter Selection & Action Toolbar */}
+      <div className="bg-white p-3.5 sm:p-4 rounded-xl border border-slate-200 shadow-2xs space-y-3">
+        {/* Row 1: Searchable Beneficiary & Date Range */}
+        <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-end">
+          {/* Searchable Beneficiary Combobox */}
+          <div className="md:col-span-6 lg:col-span-5 relative" ref={benDropdownRef}>
+            <label className="block text-2xs font-semibold text-slate-600 mb-1">
+              Tìm &amp; chọn đối tượng xuất báo cáo (Tên, mã ĐT, thẻ BHYT):
             </label>
-            <div className="flex items-center gap-1.5">
-              <Users className="w-4 h-4 text-teal-600" />
-              <select
-                value={selectedBenId || currentBeneficiary?.id || ''}
-                onChange={(e) => setSelectedBenId(e.target.value)}
-                className="text-xs font-bold p-1.5 border border-teal-300 rounded-lg bg-teal-50/40 text-slate-900 min-w-72 shadow-2xs focus:border-teal-500 focus:bg-white transition-all"
-              >
-                {receiptBeneficiaries.length > 0 && (
-                  <optgroup label={`📋 Đối tượng trong mục Phiếu Nhập Kho (${receiptBeneficiaries.length} người)`}>
-                    {receiptBeneficiaries.map((rb) => (
-                      <option key={rb.id} value={rb.id}>
-                        {rb.name} · {rb.receiptCount} phiếu nhập ({rb.receiptCodes.slice(0, 2).join(', ')}{rb.receiptCodes.length > 2 ? '...' : ''})
-                      </option>
-                    ))}
-                  </optgroup>
+            <div className="relative flex items-center">
+              <Search className="w-4 h-4 text-teal-600 absolute left-3 pointer-events-none" />
+              <input
+                type="text"
+                value={benSearchInput}
+                onFocus={(e) => {
+                  setIsBenDropdownOpen(true);
+                  e.target.select();
+                }}
+                onChange={(e) => {
+                  setBenSearchInput(e.target.value);
+                  setIsFilteringBen(true);
+                  setIsBenDropdownOpen(true);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') {
+                    setIsBenDropdownOpen(false);
+                    setIsFilteringBen(false);
+                    setBenSearchInput(currentBeneficiary?.name || '');
+                  } else if (e.key === 'Enter' && isBenDropdownOpen) {
+                    e.preventDefault();
+                    if (filteredReceiptBeneficiaries.length > 0) {
+                      const first = filteredReceiptBeneficiaries[0];
+                      handleSelectBeneficiary(first.id, first.name);
+                    } else if (filteredOtherBeneficiaries.length > 0) {
+                      const first = filteredOtherBeneficiaries[0];
+                      handleSelectBeneficiary(first.id, first.fullName);
+                    } else if (benSearchInput.trim()) {
+                      const typed = benSearchInput.trim();
+                      handleSelectBeneficiary(`name:${typed}`, typed);
+                    }
+                  }
+                }}
+                placeholder="Gõ tên đối tượng, mã hoặc số thẻ BHYT..."
+                className="w-full pl-9 pr-14 py-2 text-xs font-bold border border-teal-300 rounded-lg bg-teal-50/35 text-slate-900 shadow-2xs focus:border-teal-600 focus:bg-white focus:outline-hidden transition-all"
+                aria-label="Tìm kiếm đối tượng xuất báo cáo"
+                aria-expanded={isBenDropdownOpen}
+                role="combobox"
+              />
+              <div className="absolute right-1.5 flex items-center gap-0.5">
+                {benSearchInput && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setBenSearchInput('');
+                      setIsFilteringBen(true);
+                      setIsBenDropdownOpen(true);
+                    }}
+                    className="p-1 text-slate-400 hover:text-slate-700 rounded hover:bg-slate-100 transition-colors"
+                    title="Xóa từ khóa để tìm đối tượng khác"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
                 )}
-                {otherBeneficiaries.length > 0 && (
-                  <optgroup label={`👥 Đối tượng khác trong hồ sơ quản lý (${otherBeneficiaries.length} người)`}>
-                    {otherBeneficiaries.map((b) => (
-                      <option key={b.id} value={b.id}>
-                        {b.fullName} · {b.code} ({b.insuranceNumber || 'Chưa có BHYT'})
-                      </option>
-                    ))}
-                  </optgroup>
-                )}
-              </select>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsBenDropdownOpen((prev) => !prev);
+                    setIsFilteringBen(false);
+                  }}
+                  className="p-1 text-slate-500 hover:text-teal-700 rounded hover:bg-teal-50 transition-colors"
+                  title="Mở danh sách đối tượng"
+                >
+                  <ChevronDown
+                    className={`w-4 h-4 transition-transform duration-150 ${isBenDropdownOpen ? 'rotate-180' : ''}`}
+                  />
+                </button>
+              </div>
             </div>
+
+            {/* Searchable Dropdown List */}
+            {isBenDropdownOpen && (
+              <div className="absolute left-0 right-0 mt-1.5 bg-white border border-slate-200 rounded-xl shadow-xl z-40 max-h-72 overflow-y-auto divide-y divide-slate-100">
+                {filteredReceiptBeneficiaries.length > 0 && (
+                  <div className="p-1.5">
+                    <div className="px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-teal-700 bg-teal-50/70 rounded-md mb-1">
+                      Đối tượng trong Phiếu Nhập Kho ({filteredReceiptBeneficiaries.length})
+                    </div>
+                    {filteredReceiptBeneficiaries.map((rb) => {
+                      const isSelected = currentBeneficiary?.name.toLowerCase() === rb.name.toLowerCase();
+                      return (
+                        <button
+                          key={rb.id}
+                          type="button"
+                          onClick={() => handleSelectBeneficiary(rb.id, rb.name)}
+                          className={`w-full text-left px-2.5 py-2 rounded-lg text-xs transition-colors flex items-start justify-between gap-2 ${
+                            isSelected ? 'bg-teal-50 text-teal-950' : 'hover:bg-slate-50 text-slate-800'
+                          }`}
+                        >
+                          <div className="min-w-0">
+                            <div className="font-bold text-slate-900 truncate">{rb.name}</div>
+                            <div className="text-[11px] text-slate-500 truncate mt-0.5">
+                              <span className="font-mono">{rb.code}</span> · {rb.insuranceNumber} · {rb.receiptCount} phiếu nhập
+                            </div>
+                          </div>
+                          {isSelected && <Check className="w-4 h-4 text-teal-600 shrink-0 mt-0.5" />}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {filteredOtherBeneficiaries.length > 0 && (
+                  <div className="p-1.5">
+                    <div className="px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-600 bg-slate-100 rounded-md mb-1">
+                      Đối tượng khác trong hồ sơ quản lý ({filteredOtherBeneficiaries.length})
+                    </div>
+                    {filteredOtherBeneficiaries.map((b) => {
+                      const isSelected = currentBeneficiary?.id === b.id;
+                      return (
+                        <button
+                          key={b.id}
+                          type="button"
+                          onClick={() => handleSelectBeneficiary(b.id, b.fullName)}
+                          className={`w-full text-left px-2.5 py-2 rounded-lg text-xs transition-colors flex items-start justify-between gap-2 ${
+                            isSelected ? 'bg-teal-50 text-teal-950' : 'hover:bg-slate-50 text-slate-800'
+                          }`}
+                        >
+                          <div className="min-w-0">
+                            <div className="font-bold text-slate-900 truncate">{b.fullName}</div>
+                            <div className="text-[11px] text-slate-500 truncate mt-0.5">
+                              <span className="font-mono">{b.code}</span> · {b.insuranceNumber || 'Chưa có BHYT'} · {b.roomArea}
+                            </div>
+                          </div>
+                          {isSelected && <Check className="w-4 h-4 text-teal-600 shrink-0 mt-0.5" />}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {benSearchInput.trim() && !hasExactBenMatch && (
+                  <div className="p-1.5 bg-slate-50/70">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const typed = benSearchInput.trim();
+                        handleSelectBeneficiary(`name:${typed}`, typed);
+                      }}
+                      className="w-full text-left px-2.5 py-2 rounded-lg text-xs bg-white border border-teal-200 hover:bg-teal-50 text-teal-900 flex items-center gap-2 transition-colors"
+                    >
+                      <Users className="w-4 h-4 text-teal-600 shrink-0" />
+                      <span className="truncate">
+                        Xuất báo cáo theo tên đã nhập: <strong>"{benSearchInput.trim()}"</strong>
+                      </span>
+                    </button>
+                  </div>
+                )}
+
+                {filteredReceiptBeneficiaries.length === 0 &&
+                  filteredOtherBeneficiaries.length === 0 &&
+                  !benSearchInput.trim() && (
+                    <div className="p-4 text-center text-xs text-slate-400">
+                      Chưa có đối tượng nào trong hệ thống.
+                    </div>
+                  )}
+              </div>
+            )}
           </div>
 
-          {currentBeneficiary?.isFromReceipt && (
-            <div className="hidden xl:flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-teal-50 border border-teal-200 text-teal-800 text-2xs">
-              <span className="font-bold">✓ Khớp Phiếu Nhập:</span>
-              <span>
-                {currentBeneficiary.receiptCount} phiếu nhập ({currentBeneficiary.receiptCodes.join(', ')})
-              </span>
-            </div>
-          )}
-
-          {/* Date Range */}
-          <div>
-            <label className="block text-2xs font-semibold text-slate-500 mb-0.5">Từ ngày:</label>
+          {/* Start Date */}
+          <div className="md:col-span-3 lg:col-span-2">
+            <label className="block text-2xs font-semibold text-slate-600 mb-1">Từ ngày:</label>
             <input
               type="date"
               value={startDate}
               onChange={(e) => setStartDate(e.target.value)}
-              className="p-1.5 border border-slate-200 rounded-lg text-xs font-mono"
+              className="w-full px-2.5 py-2 border border-slate-200 rounded-lg text-xs font-mono bg-white focus:border-teal-500 focus:outline-hidden"
             />
           </div>
 
-          <div>
-            <label className="block text-2xs font-semibold text-slate-500 mb-0.5">Đến ngày:</label>
+          {/* End Date */}
+          <div className="md:col-span-3 lg:col-span-2">
+            <label className="block text-2xs font-semibold text-slate-600 mb-1">Đến ngày:</label>
             <input
               type="date"
               value={endDate}
               onChange={(e) => setEndDate(e.target.value)}
-              className="p-1.5 border border-slate-200 rounded-lg text-xs font-mono"
+              className="w-full px-2.5 py-2 border border-slate-200 rounded-lg text-xs font-mono bg-white focus:border-teal-500 focus:outline-hidden"
             />
+          </div>
+
+          {/* Matched PNK Summary */}
+          <div className="md:col-span-12 lg:col-span-3">
+            {currentBeneficiary?.isFromReceipt ? (
+              <div className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-teal-50 border border-teal-200 text-teal-800 text-2xs truncate">
+                <Check className="w-3.5 h-3.5 text-teal-600 shrink-0" />
+                <span className="truncate">
+                  <strong>{currentBeneficiary.receiptCount} phiếu nhập</strong> ({currentBeneficiary.receiptCodes.join(', ')})
+                </span>
+              </div>
+            ) : (
+              <div className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-slate-50 border border-slate-200 text-slate-600 text-2xs truncate">
+                <Users className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                <span className="truncate">Đối tượng: {customBenCode || 'Hồ sơ'}</span>
+              </div>
+            )}
           </div>
         </div>
 
-        {/* Action Buttons */}
-        <div className="flex items-center gap-2 shrink-0">
-          {/* Toggle Edit Mode */}
-          {canEditReport ? (
+        {/* Row 2: Action Buttons */}
+        <div className="flex flex-wrap items-center justify-between gap-2 pt-3 border-t border-slate-100">
+          <div className="flex flex-wrap items-center gap-2">
+            {canEditReport ? (
+              <button
+                onClick={() => setIsEditMode(!isEditMode)}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all whitespace-nowrap ${
+                  isEditMode
+                    ? 'bg-amber-600 text-white shadow-xs'
+                    : 'border border-amber-300 text-amber-800 bg-amber-50/60 hover:bg-amber-100'
+                }`}
+              >
+                <Edit3 className="w-3.5 h-3.5" />
+                <span>{isEditMode ? 'Đang Hiệu Chỉnh' : 'Hiệu Chỉnh Biểu Mẫu'}</span>
+              </button>
+            ) : (
+              <span
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-slate-200 text-slate-400 bg-slate-50 cursor-not-allowed whitespace-nowrap"
+                title={`Vai trò ${currentUser.role} không có quyền hiệu chỉnh số liệu báo cáo`}
+              >
+                <Edit3 className="w-3.5 h-3.5 text-slate-400" />
+                <span>Khóa Hiệu Chỉnh</span>
+              </span>
+            )}
+
+            {isCustomized && (
+              <button
+                onClick={handleResetToCalculated}
+                className="flex items-center gap-1 px-2.5 py-1.5 border border-slate-200 hover:bg-slate-100 rounded-lg text-xs text-slate-600 whitespace-nowrap"
+                title="Khôi phục số liệu tự động tính từ sổ kho"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span>Khôi phục gốc</span>
+              </button>
+            )}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
             <button
-              onClick={() => setIsEditMode(!isEditMode)}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-                isEditMode
-                  ? 'bg-amber-600 text-white shadow-xs'
-                  : 'border border-amber-300 text-amber-800 bg-amber-50/60 hover:bg-amber-100'
-              }`}
+              onClick={exportFullGoogleSheetData}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-semibold shadow-xs transition-colors whitespace-nowrap"
+              title="Xuất tệp Google Sheet / Excel tối ưu 04 Sheet: Phiếu nhập, Phiếu xuất, Báo cáo, Tài khoản"
             >
-              <Edit3 className="w-3.5 h-3.5" />
-              <span>{isEditMode ? 'Đang Hiệu Chỉnh' : 'Bật Hiệu Chỉnh Biểu Mẫu'}</span>
+              <FileSpreadsheet className="w-3.5 h-3.5" />
+              <span>Xuất 04 Sheet (.xlsx)</span>
             </button>
-          ) : (
-            <span
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-slate-200 text-slate-400 bg-slate-50 cursor-not-allowed"
-              title={`Vai trò ${currentUser.role} không có quyền hiệu chỉnh số liệu báo cáo`}
-            >
-              <Edit3 className="w-3.5 h-3.5 text-slate-400" />
-              <span>Khóa Hiệu Chỉnh</span>
-            </span>
-          )}
 
-          {isCustomized && (
             <button
-              onClick={handleResetToCalculated}
-              className="flex items-center gap-1 px-2.5 py-1.5 border border-slate-200 hover:bg-slate-100 rounded-lg text-xs text-slate-600"
-              title="Khôi phục số liệu tự động tính từ sổ kho"
+              onClick={handleExportCSV}
+              className="flex items-center gap-1.5 px-3 py-1.5 border border-slate-200 hover:bg-slate-50 rounded-lg text-xs font-semibold text-slate-700 transition-colors whitespace-nowrap"
+              title="Xuất báo cáo cá nhân định dạng CSV"
             >
-              <RotateCcw className="w-3.5 h-3.5" />
-              <span>Khôi phục gốc</span>
+              <Download className="w-3.5 h-3.5" />
+              <span>Xuất CSV</span>
             </button>
-          )}
 
-          <button
-            onClick={exportFullGoogleSheetData}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-semibold shadow-xs transition-colors"
-            title="Xuất tệp Google Sheet / Excel tối ưu 03 Sheet: Phiếu nhập, Phiếu xuất, Báo cáo (1 dòng / đối tượng)"
-          >
-            <FileSpreadsheet className="w-3.5 h-3.5" />
-            <span>Xuất 03 Sheet (.xlsx)</span>
-          </button>
+            {isAdmin && (
+              <button
+                onClick={handleSaveToDrive}
+                disabled={driveSaving}
+                className="flex items-center gap-1.5 px-3 py-1.5 border border-teal-600 text-teal-700 hover:bg-teal-50 rounded-lg text-xs font-semibold transition-colors disabled:opacity-50 whitespace-nowrap"
+              >
+                {driveSaving ? (
+                  <div className="w-3.5 h-3.5 border-2 border-teal-600 border-t-transparent rounded-full animate-spin" />
+                ) : driveSavedInfo ? (
+                  <Check className="w-3.5 h-3.5 text-emerald-600" />
+                ) : (
+                  <Cloud className="w-3.5 h-3.5" />
+                )}
+                <span>{driveSaving ? 'Đang lưu Drive...' : 'Lưu Drive'}</span>
+              </button>
+            )}
 
-          <button
-            onClick={handleExportCSV}
-            className="flex items-center gap-1.5 px-3 py-1.5 border border-slate-200 hover:bg-slate-50 rounded-lg text-xs font-semibold text-slate-700 transition-colors"
-            title="Xuất báo cáo cá nhân định dạng CSV"
-          >
-            <Download className="w-3.5 h-3.5" />
-            <span>Xuất CSV</span>
-          </button>
-
-          {isAdmin && (
             <button
-              onClick={handleSaveToDrive}
-              disabled={driveSaving}
-              className="flex items-center gap-1.5 px-3 py-1.5 border border-teal-600 text-teal-700 hover:bg-teal-50 rounded-lg text-xs font-semibold transition-colors disabled:opacity-50"
+              onClick={handleOpenPrint}
+              disabled={!canExportReport}
+              className="flex items-center gap-1.5 px-3.5 py-1.5 bg-teal-600 hover:bg-teal-700 text-white rounded-lg text-xs font-semibold shadow-xs transition-colors disabled:opacity-50 whitespace-nowrap"
             >
-              {driveSaving ? (
-                <div className="w-3.5 h-3.5 border-2 border-teal-600 border-t-transparent rounded-full animate-spin" />
-              ) : driveSavedInfo ? (
-                <Check className="w-3.5 h-3.5 text-emerald-600" />
-              ) : (
-                <Cloud className="w-3.5 h-3.5" />
-              )}
-              <span>{driveSaving ? 'Đang lưu Drive...' : 'Lưu Drive'}</span>
+              <Printer className="w-4 h-4" />
+              <span>In Báo Cáo Chuẩn A4</span>
             </button>
-          )}
-
-          <button
-            onClick={handleOpenPrint}
-            disabled={!canExportReport}
-            className="flex items-center gap-1.5 px-4 py-1.5 bg-teal-600 hover:bg-teal-700 text-white rounded-lg text-xs font-semibold shadow-xs transition-colors disabled:opacity-50"
-          >
-            <Printer className="w-4 h-4" />
-            <span>In Báo Cáo Chuẩn A4</span>
-          </button>
+          </div>
         </div>
       </div>
 
       {driveSavedInfo && isAdmin && (
-        <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-900 flex items-center justify-between gap-2">
+        <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-900 flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2">
             <Check className="w-4 h-4 text-emerald-600 shrink-0" />
             <span>{driveSavedInfo.message}</span>
@@ -674,14 +890,14 @@ export const BeneficiaryReportView: React.FC<BeneficiaryReportViewProps> = ({ in
       )}
 
       {/* Auto-Extraction Status Banner */}
-      <div className="bg-gradient-to-r from-teal-50 via-emerald-50 to-teal-50 border border-teal-200 rounded-xl p-3 shadow-2xs flex flex-wrap items-center justify-between gap-3 text-xs">
-        <div className="flex items-center gap-2.5">
+      <div className="bg-gradient-to-r from-teal-50 via-emerald-50 to-teal-50 border border-teal-200 rounded-xl p-3 shadow-2xs flex flex-col lg:flex-row lg:items-center justify-between gap-3 text-xs">
+        <div className="flex items-start sm:items-center gap-2.5 min-w-0">
           <div className="w-8 h-8 rounded-lg bg-teal-600 text-white flex items-center justify-center shrink-0 shadow-xs">
             <Sparkles className="w-4 h-4" />
           </div>
-          <div>
-            <div className="font-bold text-slate-800 flex items-center gap-2">
-              <span>Hệ thống tự động trích xuất dữ liệu từ Phiếu Nhập & Phiếu Xuất kho</span>
+          <div className="min-w-0">
+            <div className="font-bold text-slate-800 flex flex-wrap items-center gap-x-2 gap-y-0.5">
+              <span>Hệ thống tự động trích xuất dữ liệu từ Phiếu Nhập &amp; Phiếu Xuất kho</span>
               <span className="text-teal-800 font-mono text-2xs tabular-nums">
                 ({rows.length} mặt hàng thuốc)
               </span>
@@ -689,7 +905,7 @@ export const BeneficiaryReportView: React.FC<BeneficiaryReportViewProps> = ({ in
             <div className="text-2xs text-slate-600 mt-0.5">
               Đối tượng: <strong className="text-teal-900">{customBenName || 'Chưa chọn'}</strong>
               {benActivityDates.length > 0 ? (
-                <> · Ghi nhận hoạt động từ ngày <strong className="text-slate-800">{formatDate(benActivityDates[0])}</strong> đến <strong className="text-slate-800">{formatDate(benActivityDates[benActivityDates.length - 1])}</strong></>
+                <> · Ghi nhận từ ngày <strong className="text-slate-800">{formatDate(benActivityDates[0])}</strong> đến <strong className="text-slate-800">{formatDate(benActivityDates[benActivityDates.length - 1])}</strong></>
               ) : (
                 <> · Sẵn sàng tự động tổng hợp khi có phát sinh phiếu nhập/xuất</>
               )}
@@ -697,36 +913,36 @@ export const BeneficiaryReportView: React.FC<BeneficiaryReportViewProps> = ({ in
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
           {benActivityDates.length > 0 && (
             <button
               onClick={() => {
                 setStartDate(benActivityDates[0]);
                 setEndDate(benActivityDates[benActivityDates.length - 1]);
               }}
-              className="px-2.5 py-1.5 rounded-lg border border-teal-300 bg-white hover:bg-teal-50 text-teal-800 text-2xs font-semibold shadow-2xs transition-colors flex items-center gap-1"
+              className="px-2.5 py-1.5 rounded-lg border border-teal-300 bg-white hover:bg-teal-50 text-teal-800 text-2xs font-semibold shadow-2xs transition-colors flex items-center gap-1 whitespace-nowrap"
               title="Tự động căn chỉnh từ ngày đến ngày bao trọn toàn bộ phiếu nhập và xuất của đối tượng"
             >
               <Calendar className="w-3.5 h-3.5 text-teal-600" />
-              <span>Bao trọn thời gian ({formatDate(benActivityDates[0])} - {formatDate(benActivityDates[benActivityDates.length - 1])})</span>
+              <span>Bao trọn ({formatDate(benActivityDates[0])} - {formatDate(benActivityDates[benActivityDates.length - 1])})</span>
             </button>
           )}
           <button
             onClick={handleResetToCalculated}
-            className="px-2.5 py-1.5 rounded-lg bg-teal-700 hover:bg-teal-800 text-white text-2xs font-semibold shadow-2xs transition-colors flex items-center gap-1"
+            className="px-2.5 py-1.5 rounded-lg bg-teal-700 hover:bg-teal-800 text-white text-2xs font-semibold shadow-2xs transition-colors flex items-center gap-1 whitespace-nowrap"
             title="Tự động đồng bộ và nạp lại toàn bộ số lượng, đơn giá trực tiếp từ các phiếu nhập kho"
           >
             <RotateCcw className="w-3.5 h-3.5" />
-            <span>Tự động trích xuất lại</span>
+            <span>Trích xuất lại</span>
           </button>
         </div>
       </div>
 
       {/* Edit Mode Notice Ribbon */}
       {isEditMode && (
-        <div className="bg-amber-50 border border-amber-300 rounded-xl p-3 text-xs text-amber-900 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Edit3 className="w-4 h-4 text-amber-700 shrink-0" />
+        <div className="bg-amber-50 border border-amber-300 rounded-xl p-3 text-xs text-amber-900 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+          <div className="flex items-start sm:items-center gap-2">
+            <Edit3 className="w-4 h-4 text-amber-700 shrink-0 mt-0.5 sm:mt-0" />
             <span>
               <strong>Chế độ hiệu chỉnh biểu mẫu đang bật:</strong> Bạn có thể sửa trực tiếp thông tin cơ quan, tên
               đối tượng, số thẻ BHYT, từng dòng số lượng, đơn giá, bổ sung dòng thuốc mới hoặc đổi chữ ký theo nhu cầu
@@ -735,7 +951,7 @@ export const BeneficiaryReportView: React.FC<BeneficiaryReportViewProps> = ({ in
           </div>
           <button
             onClick={handleAddCustomRow}
-            className="flex items-center gap-1 px-3 py-1 bg-amber-700 hover:bg-amber-800 text-white rounded text-2xs font-semibold shrink-0"
+            className="flex items-center justify-center gap-1 px-3 py-1.5 bg-amber-700 hover:bg-amber-800 text-white rounded-lg text-2xs font-semibold shrink-0 whitespace-nowrap"
           >
             <Plus className="w-3.5 h-3.5" />
             <span>Thêm Dòng Thuốc Mới</span>
@@ -744,12 +960,12 @@ export const BeneficiaryReportView: React.FC<BeneficiaryReportViewProps> = ({ in
       )}
 
       {/* Official Report Container */}
-      <div id="beneficiary-report-canvas" className="bg-white rounded-xl border border-slate-200 p-6 shadow-2xs overflow-x-auto">
+      <div id="beneficiary-report-canvas" className="bg-white rounded-xl border border-slate-200 p-4 sm:p-6 shadow-2xs">
         {/* Administrative Header */}
-        <div className="flex justify-between items-start mb-4 pb-4 border-b border-slate-100">
-          <div>
+        <div className="flex flex-col sm:flex-row justify-between items-start gap-4 mb-4 pb-4 border-b border-slate-100">
+          <div className="w-full sm:w-auto">
             {isEditMode ? (
-              <div className="space-y-1 w-80">
+              <div className="space-y-1 w-full sm:w-80">
                 <input
                   type="text"
                   value={parentOrg}
@@ -780,20 +996,20 @@ export const BeneficiaryReportView: React.FC<BeneficiaryReportViewProps> = ({ in
               </div>
             )}
           </div>
-          <div className="text-right">
+          <div className="w-full sm:w-auto text-left sm:text-right">
             {isEditMode ? (
-              <div className="space-y-1 w-72">
+              <div className="space-y-1 w-full sm:w-72">
                 <input
                   type="text"
                   value={nationalMottoTop}
                   onChange={(e) => setNationalMottoTop(e.target.value)}
-                  className="w-full text-right text-xs font-bold uppercase p-1 border border-amber-300 rounded bg-amber-50/50"
+                  className="w-full text-left sm:text-right text-xs font-bold uppercase p-1 border border-amber-300 rounded bg-amber-50/50"
                 />
                 <input
                   type="text"
                   value={nationalMottoSub}
                   onChange={(e) => setNationalMottoSub(e.target.value)}
-                  className="w-full text-right text-xs italic font-medium p-1 border border-amber-300 rounded bg-amber-50/50"
+                  className="w-full text-left sm:text-right text-xs italic font-medium p-1 border border-amber-300 rounded bg-amber-50/50"
                 />
               </div>
             ) : (
@@ -835,15 +1051,15 @@ export const BeneficiaryReportView: React.FC<BeneficiaryReportViewProps> = ({ in
             <span className="font-semibold text-slate-700">{formatDate(endDate)}</span>
           </div>
 
-          <div className="text-xs font-medium text-slate-800 mt-2 bg-slate-50 py-2 px-3 rounded-lg inline-block border border-slate-200">
+          <div className="text-xs font-medium text-slate-800 mt-2 bg-slate-50 py-2 px-3 rounded-lg inline-block max-w-full border border-slate-200">
             {isEditMode ? (
-              <div className="flex flex-wrap items-center gap-2">
+              <div className="flex flex-wrap items-center justify-center gap-2">
                 <span>Họ tên ĐT:</span>
                 <input
                   type="text"
                   value={customBenName}
                   onChange={(e) => setCustomBenName(e.target.value)}
-                  className="font-bold uppercase p-1 border border-amber-300 rounded bg-white text-xs w-44"
+                  className="font-bold uppercase p-1 border border-amber-300 rounded bg-white text-xs w-44 max-w-full"
                 />
                 <span>Mã:</span>
                 <input
@@ -857,18 +1073,18 @@ export const BeneficiaryReportView: React.FC<BeneficiaryReportViewProps> = ({ in
                   type="text"
                   value={customInsuranceNumber}
                   onChange={(e) => setCustomInsuranceNumber(e.target.value)}
-                  className="font-mono font-bold p-1 border border-amber-300 rounded bg-white text-xs text-teal-800 w-36"
+                  className="font-mono font-bold p-1 border border-amber-300 rounded bg-white text-xs text-teal-800 w-36 max-w-full"
                 />
                 <span>Khu:</span>
                 <input
                   type="text"
                   value={customRoomArea}
                   onChange={(e) => setCustomRoomArea(e.target.value)}
-                  className="p-1 border border-amber-300 rounded bg-white text-xs w-36"
+                  className="p-1 border border-amber-300 rounded bg-white text-xs w-36 max-w-full"
                 />
               </div>
             ) : (
-              <div>
+              <div className="leading-relaxed">
                 Họ và tên đối tượng: <span className="font-bold text-slate-900 uppercase">{customBenName}</span> · Mã
                 ĐT: <span className="font-mono font-bold">{customBenCode}</span> · Số thẻ BHYT:{' '}
                 <span className="font-mono font-bold text-teal-800">{customInsuranceNumber}</span> · Khu:{' '}
@@ -1171,7 +1387,7 @@ export const BeneficiaryReportView: React.FC<BeneficiaryReportViewProps> = ({ in
                   type="text"
                   value={preparerName}
                   onChange={(e) => setPreparerName(e.target.value)}
-                  className="font-semibold text-center p-1 border border-amber-300 rounded bg-white text-xs"
+                  className="w-full max-w-[220px] font-semibold text-center p-1 border border-amber-300 rounded bg-white text-xs"
                 />
               ) : null}
             </div>
@@ -1187,7 +1403,7 @@ export const BeneficiaryReportView: React.FC<BeneficiaryReportViewProps> = ({ in
                   type="text"
                   value={deptLeaderName}
                   onChange={(e) => setDeptLeaderName(e.target.value)}
-                  className="font-semibold text-center p-1 border border-amber-300 rounded bg-white text-xs"
+                  className="w-full max-w-[220px] font-semibold text-center p-1 border border-amber-300 rounded bg-white text-xs"
                 />
               ) : null}
             </div>
@@ -1203,7 +1419,7 @@ export const BeneficiaryReportView: React.FC<BeneficiaryReportViewProps> = ({ in
                   type="text"
                   value={centerDirectorName}
                   onChange={(e) => setCenterDirectorName(e.target.value)}
-                  className="font-semibold text-center p-1 border border-amber-300 rounded bg-white text-xs"
+                  className="w-full max-w-[220px] font-semibold text-center p-1 border border-amber-300 rounded bg-white text-xs"
                 />
               ) : null}
             </div>

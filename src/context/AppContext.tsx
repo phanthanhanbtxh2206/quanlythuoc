@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { createContext, useContext, useState, useEffect, useMemo } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
 import {
   User,
   Beneficiary,
@@ -27,10 +27,12 @@ import {
   TemplateSettings,
   DEFAULT_TEMPLATE_SETTINGS,
   BackupLog,
+  CloudStateSnapshot,
 } from '../types';
 import {
   downloadThreeSheetsExcelWorkbook,
   downloadThreeSheetsCSV,
+  parseUsersFromAccountSheet,
 } from '../utils/googleSheetsBackup';
 import {
   initGoogleAuth,
@@ -40,18 +42,25 @@ import {
 } from '../services/googleAuth';
 import {
   syncAllDataToGoogleSheets,
+  readAccountSheetViaOAuth,
   GoogleSheetsSyncResult,
   extractSpreadsheetId,
   GOOGLE_SAMPLE_READONLY_ID,
 } from '../services/googleSheetsService';
 import {
   syncAllDataViaAppsScript,
+  pullAllDataViaAppsScript,
   uploadDocumentViaAppsScript,
   testAppsScriptConnection,
   isValidAppsScriptUrl,
+  DRIVE_STATE_FILENAME,
   AppsScriptPingResult,
 } from '../services/appsScriptSyncService';
-import { uploadFileToGoogleDrive } from '../services/googleDriveService';
+import {
+  uploadFileToGoogleDrive,
+  upsertJsonFileInGoogleDrive,
+  readJsonFileFromGoogleDrive,
+} from '../services/googleDriveService';
 import {
   INITIAL_USERS,
   INITIAL_BENEFICIARIES,
@@ -63,6 +72,16 @@ import {
   INITIAL_TRANSACTIONS,
 } from '../data/mockData';
 import { getTodayISODate } from '../utils/formatters';
+
+export const INACTIVITY_TIMEOUT_MS = 60 * 60 * 1000; // 60 minutes (1 hour)
+
+interface CloudPullResult {
+  success: boolean;
+  usersUpdated?: number;
+  restoredFromDrive?: boolean;
+  timestamp?: string;
+  error?: string;
+}
 
 interface AppContextType {
   // Data
@@ -80,15 +99,17 @@ interface AppContextType {
   templateSettings: TemplateSettings;
   backupLogs: BackupLog[];
 
-  // Google Sheets Real-time Auto-Sync (Admin Only)
+  // Google Sheets & Drive Bidirectional Sync
   googleUser: any;
   isGoogleAuthenticated: boolean;
   isSyncingSheets: boolean;
+  isPullingFromCloud: boolean;
   syncSheetsError: string | null;
   lastSheetsSyncResult: GoogleSheetsSyncResult | null;
   loginWithGoogle: () => Promise<{ success: boolean; error?: string; cancelled?: boolean }>;
   logoutFromGoogle: () => Promise<void>;
   syncNowToGoogleSheets: (skipConfirm?: boolean) => Promise<GoogleSheetsSyncResult | null>;
+  pullFromSheetsAndDrive: (silent?: boolean) => Promise<CloudPullResult>;
   testAppsScriptSync: (url: string) => Promise<AppsScriptPingResult>;
 
   // Template & Auto-backup Actions
@@ -98,11 +119,14 @@ interface AppContextType {
   exportFullGoogleSheetData: () => void;
   exportFullGoogleSheetCSV: () => void;
 
-  // User & Authentication Actions (RBAC)
+  // User & Authentication Actions (RBAC + Session Timeout)
   isAuthenticated: boolean;
+  sessionNotice: string | null;
+  clearSessionNotice: () => void;
+  remainingSessionSeconds: number;
   setCurrentUser: (user: User) => void;
   loginWithCredentials: (emailOrPhone: string, password?: string) => { success: boolean; error?: string };
-  logoutApp: () => void;
+  logoutApp: (reason?: string) => void;
   registerNewAccount: (data: {
     email: string;
     password?: string;
@@ -113,6 +137,8 @@ interface AppContextType {
     autoApprove?: boolean;
   }) => { success: boolean; message: string; user?: User };
   hasPermission: (permission: keyof RolePermissions) => boolean;
+  canModifyReceipt: (receipt: StockReceipt, action: 'edit' | 'delete') => boolean;
+  canModifyIssue: (issue: StockIssue, action: 'edit' | 'delete') => boolean;
   registerUser: (email: string, fullName: string, department: string, phone: string, requestedRole: UserRole) => void;
   approveUser: (userId: string, role: UserRole) => void;
   rejectUser: (userId: string) => void;
@@ -148,9 +174,9 @@ interface AppContextType {
     receiptId: string,
     receiptData: Partial<StockReceipt>,
     items: Omit<StockReceiptItem, 'id' | 'receiptId' | 'totalPrice'>[]
-  ) => StockReceipt;
-  deleteStockReceipt: (receiptId: string) => void;
-  
+  ) => { success: boolean; receipt?: StockReceipt; error?: string };
+  deleteStockReceipt: (receiptId: string) => { success: boolean; error?: string };
+
   createStockIssue: (
     issueData: Omit<StockIssue, 'id' | 'totalAmount' | 'createdBy' | 'createdByName' | 'createdAt' | 'status'>,
     items: Omit<StockIssueItem, 'id' | 'issueId' | 'totalPrice'>[]
@@ -160,14 +186,14 @@ interface AppContextType {
     issueData: Partial<StockIssue>,
     items: Omit<StockIssueItem, 'id' | 'issueId' | 'totalPrice'>[]
   ) => { success: boolean; issue?: StockIssue; error?: string };
-  deleteStockIssue: (issueId: string) => void;
+  deleteStockIssue: (issueId: string) => { success: boolean; error?: string };
 
   // Prescription & Dispensation Actions
   createPrescription: (
     prescData: Omit<Prescription, 'id' | 'createdAt' | 'status' | 'items'>,
     items: Omit<PrescriptionItem, 'id' | 'prescriptionId' | 'dispensedQuantity'>[]
   ) => Prescription;
-  
+
   dispensePrescription: (
     prescriptionId: string,
     itemsToDispense: { medicineId: string; batchNumber: string; quantity: number; unitPrice: number; expiryDate: string }[],
@@ -188,104 +214,155 @@ interface AppContextType {
     fileName: string,
     documentHtmlContent?: string
   ) => Promise<DriveSyncedFile | null>;
-  resetAllData: () => void;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
-const STORAGE_KEYS = {
-  USERS: 'btxh_users_v1',
-  BENEFICIARIES: 'btxh_beneficiaries_v1',
-  MEDICINES: 'btxh_medicines_v1',
-  SOURCES: 'btxh_sources_v1',
-  RECEIPTS: 'btxh_receipts_v1',
-  ISSUES: 'btxh_issues_v1',
-  PRESCRIPTIONS: 'btxh_prescriptions_v1',
-  TRANSACTIONS: 'btxh_transactions_v1',
-  AUDIT_LOGS: 'btxh_audit_logs_v1',
-  SYNCED_FILES: 'btxh_synced_files_v1',
-  CURRENT_USER: 'btxh_current_user_v1',
-  IS_AUTHENTICATED: 'btxh_is_authenticated_v1',
-  TEMPLATE_SETTINGS: 'btxh_template_settings_v1',
-  BACKUP_LOGS: 'btxh_backup_logs_v1',
+// Ephemeral working cache keys (sessionStorage ONLY - cleared when closing browser/session)
+const SESSION_STORAGE_KEYS = {
+  USERS: 'btxh_sess_users_v2',
+  BENEFICIARIES: 'btxh_sess_beneficiaries_v2',
+  MEDICINES: 'btxh_sess_medicines_v2',
+  SOURCES: 'btxh_sess_sources_v2',
+  RECEIPTS: 'btxh_sess_receipts_v2',
+  ISSUES: 'btxh_sess_issues_v2',
+  PRESCRIPTIONS: 'btxh_sess_prescriptions_v2',
+  TRANSACTIONS: 'btxh_sess_transactions_v2',
+  AUDIT_LOGS: 'btxh_sess_audit_logs_v2',
+  SYNCED_FILES: 'btxh_sess_synced_files_v2',
+  CURRENT_USER: 'btxh_sess_current_user_v2',
+  IS_AUTHENTICATED: 'btxh_sess_authenticated_v2',
+  LAST_ACTIVITY: 'btxh_sess_last_activity_v2',
+  TEMPLATE_SETTINGS: 'btxh_sess_template_settings_v2',
+  BACKUP_LOGS: 'btxh_sess_backup_logs_v2',
+};
+
+// Minimal connection bridge pointer so the app knows which Sheets/Apps Script to connect on boot
+const CLOUD_BRIDGE_CONFIG_KEY = 'btxh_cloud_bridge_cfg_v2';
+
+// Legacy localStorage keys to scrub so data is strictly persisted on Google Sheets & Drive
+const LEGACY_LOCAL_KEYS = [
+  'btxh_users_v1',
+  'btxh_beneficiaries_v1',
+  'btxh_medicines_v1',
+  'btxh_sources_v1',
+  'btxh_receipts_v1',
+  'btxh_issues_v1',
+  'btxh_prescriptions_v1',
+  'btxh_transactions_v1',
+  'btxh_audit_logs_v1',
+  'btxh_synced_files_v1',
+  'btxh_current_user_v1',
+  'btxh_is_authenticated_v1',
+  'btxh_template_settings_v1',
+  'btxh_backup_logs_v1',
+];
+
+const migrateTemplateSettings = (raw: Partial<TemplateSettings>): TemplateSettings => {
+  const merged: TemplateSettings = { ...DEFAULT_TEMPLATE_SETTINGS, ...raw };
+  if (!merged.parentOrg || /lao\s*động|thương\s*binh/i.test(merged.parentOrg)) {
+    merged.parentOrg = 'SỞ Y TẾ THÀNH PHỐ ĐÀ NẴNG';
+  }
+  if (merged.googleSheetUrl && merged.googleSheetUrl.includes(GOOGLE_SAMPLE_READONLY_ID)) {
+    merged.googleSheetUrl = '';
+  }
+  if (merged.googleSpreadsheetId === GOOGLE_SAMPLE_READONLY_ID) {
+    merged.googleSpreadsheetId = '';
+  }
+  if (!merged.googleSpreadsheetId && merged.googleSheetUrl) {
+    merged.googleSpreadsheetId = extractSpreadsheetId(merged.googleSheetUrl);
+  }
+  const envScriptUrl = (import.meta as any)?.env?.VITE_APPS_SCRIPT_URL;
+  if (!merged.appsScriptUrl && envScriptUrl) {
+    merged.appsScriptUrl = String(envScriptUrl);
+  }
+  return merged;
+};
+
+const readSessionJson = <T,>(key: string, fallback: T): T => {
+  try {
+    const raw = sessionStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T) : fallback;
+  } catch {
+    return fallback;
+  }
 };
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  // State Initialization from LocalStorage or Defaults
-  const [users, setUsers] = useState<User[]>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.USERS);
-    return saved ? JSON.parse(saved) : INITIAL_USERS;
-  });
-
-  const [currentUser, setCurrentUser] = useState<User>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.CURRENT_USER);
-    if (saved) {
+  // Scrub legacy long-term localStorage records (business data is persisted exclusively on Sheets & Drive + working session cache)
+  useEffect(() => {
+    LEGACY_LOCAL_KEYS.forEach((k) => {
       try {
-        return JSON.parse(saved);
+        localStorage.removeItem(k);
       } catch {
-        // fallback
+        // ignore
       }
-    }
-    return INITIAL_USERS[2]; // Default to Pharmacist DS. Lê Thu Hà
-  });
+    });
+  }, []);
 
+  // Ephemeral working-session state initialization
+  const [users, setUsers] = useState<User[]>(() => readSessionJson(SESSION_STORAGE_KEYS.USERS, INITIAL_USERS));
+  const [currentUser, setCurrentUser] = useState<User>(() =>
+    readSessionJson(SESSION_STORAGE_KEYS.CURRENT_USER, INITIAL_USERS[2])
+  );
+
+  // Requirement 1: Always require fresh login on first visit or when inactivity >= 60 minutes
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.IS_AUTHENTICATED);
-    return saved !== null ? saved === 'true' : true;
+    try {
+      const flag = sessionStorage.getItem(SESSION_STORAGE_KEYS.IS_AUTHENTICATED);
+      const lastActiveStr = sessionStorage.getItem(SESSION_STORAGE_KEYS.LAST_ACTIVITY);
+      if (flag === 'true' && lastActiveStr) {
+        const elapsed = Date.now() - Number(lastActiveStr);
+        if (elapsed >= 0 && elapsed < INACTIVITY_TIMEOUT_MS) {
+          return true;
+        }
+      }
+    } catch {
+      // ignore
+    }
+    return false;
   });
 
-  const [beneficiaries, setBeneficiaries] = useState<Beneficiary[]>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.BENEFICIARIES);
-    return saved ? JSON.parse(saved) : INITIAL_BENEFICIARIES;
-  });
+  const [sessionNotice, setSessionNotice] = useState<string | null>(null);
+  const [remainingSessionSeconds, setRemainingSessionSeconds] = useState<number>(
+    Math.floor(INACTIVITY_TIMEOUT_MS / 1000)
+  );
+  const lastActivityRef = useRef<number>(Date.now());
 
-  const [medicines, setMedicines] = useState<Medicine[]>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.MEDICINES);
-    return saved ? JSON.parse(saved) : INITIAL_MEDICINES;
-  });
-
-  const [sources] = useState<MedicineSource[]>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.SOURCES);
-    return saved ? JSON.parse(saved) : INITIAL_SOURCES;
-  });
-
-  const [receipts, setReceipts] = useState<StockReceipt[]>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.RECEIPTS);
-    return saved ? JSON.parse(saved) : INITIAL_STOCK_RECEIPTS;
-  });
-
-  const [issues, setIssues] = useState<StockIssue[]>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.ISSUES);
-    return saved ? JSON.parse(saved) : INITIAL_STOCK_ISSUES;
-  });
-
-  const [prescriptions, setPrescriptions] = useState<Prescription[]>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.PRESCRIPTIONS);
-    return saved ? JSON.parse(saved) : INITIAL_PRESCRIPTIONS;
-  });
-
-  const [transactions, setTransactions] = useState<StockTransaction[]>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.TRANSACTIONS);
-    return saved ? JSON.parse(saved) : INITIAL_TRANSACTIONS;
-  });
+  const [beneficiaries, setBeneficiaries] = useState<Beneficiary[]>(() =>
+    readSessionJson(SESSION_STORAGE_KEYS.BENEFICIARIES, INITIAL_BENEFICIARIES)
+  );
+  const [medicines, setMedicines] = useState<Medicine[]>(() =>
+    readSessionJson(SESSION_STORAGE_KEYS.MEDICINES, INITIAL_MEDICINES)
+  );
+  const [sources] = useState<MedicineSource[]>(() =>
+    readSessionJson(SESSION_STORAGE_KEYS.SOURCES, INITIAL_SOURCES)
+  );
+  const [receipts, setReceipts] = useState<StockReceipt[]>(() =>
+    readSessionJson(SESSION_STORAGE_KEYS.RECEIPTS, INITIAL_STOCK_RECEIPTS)
+  );
+  const [issues, setIssues] = useState<StockIssue[]>(() =>
+    readSessionJson(SESSION_STORAGE_KEYS.ISSUES, INITIAL_STOCK_ISSUES)
+  );
+  const [prescriptions, setPrescriptions] = useState<Prescription[]>(() =>
+    readSessionJson(SESSION_STORAGE_KEYS.PRESCRIPTIONS, INITIAL_PRESCRIPTIONS)
+  );
+  const [transactions, setTransactions] = useState<StockTransaction[]>(() =>
+    readSessionJson(SESSION_STORAGE_KEYS.TRANSACTIONS, INITIAL_TRANSACTIONS)
+  );
 
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.AUDIT_LOGS);
-    if (saved) {
-      try {
-        const parsed: AuditLog[] = JSON.parse(saved);
-        const seen = new Set<string>();
-        return parsed.map((item, idx) => {
-          let id = item.id;
-          if (!id || seen.has(id)) {
-            id = `${id || 'log'}-${idx}-${Math.random().toString(36).substring(2, 7)}`;
-          }
-          seen.add(id);
-          return { ...item, id };
-        });
-      } catch {
-        // fallback
-      }
+    const parsed = readSessionJson<AuditLog[] | null>(SESSION_STORAGE_KEYS.AUDIT_LOGS, null);
+    if (parsed) {
+      const seen = new Set<string>();
+      return parsed.map((item, idx) => {
+        let id = item.id;
+        if (!id || seen.has(id)) {
+          id = `${id || 'log'}-${idx}-${Math.random().toString(36).substring(2, 7)}`;
+        }
+        seen.add(id);
+        return { ...item, id };
+      });
     }
     return [
       {
@@ -296,15 +373,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         action: 'KHỞI_TẠO',
         entity: 'HỆ_THỐNG',
         entityId: 'SYS',
-        details: 'Khởi tạo dữ liệu ban đầu hệ thống Quản lý Dược TT BTXH Đà Nẵng',
+        details: 'Khởi tạo phiên làm việc hệ thống Quản lý Dược TT BTXH Đà Nẵng',
       },
     ];
   });
 
-  const [syncedFiles, setSyncedFiles] = useState<DriveSyncedFile[]>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.SYNCED_FILES);
-    if (saved) return JSON.parse(saved);
-    return [
+  const [syncedFiles, setSyncedFiles] = useState<DriveSyncedFile[]>(() =>
+    readSessionJson<DriveSyncedFile[]>(SESSION_STORAGE_KEYS.SYNCED_FILES, [
       {
         id: 'sync-1',
         fileId: 'drv-file-001',
@@ -327,54 +402,41 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         fileSize: '138 KB',
         syncedToSheets: true,
       },
-    ];
-  });
+    ])
+  );
 
   const [templateSettings, setTemplateSettings] = useState<TemplateSettings>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.TEMPLATE_SETTINGS);
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        const merged: TemplateSettings = { ...DEFAULT_TEMPLATE_SETTINGS, ...parsed };
-        if (merged.googleSheetUrl && merged.googleSheetUrl.includes(GOOGLE_SAMPLE_READONLY_ID)) {
-          merged.googleSheetUrl = '';
-        }
-        if (merged.googleSpreadsheetId === GOOGLE_SAMPLE_READONLY_ID) {
-          merged.googleSpreadsheetId = '';
-        }
-        if (!merged.googleSpreadsheetId && merged.googleSheetUrl) {
-          merged.googleSpreadsheetId = extractSpreadsheetId(merged.googleSheetUrl);
-        }
-        return merged;
-      } catch {
-        // fallback
-      }
+    const sessRaw = readSessionJson<Partial<TemplateSettings> | null>(
+      SESSION_STORAGE_KEYS.TEMPLATE_SETTINGS,
+      null
+    );
+    let bridgeRaw: Partial<TemplateSettings> = {};
+    try {
+      const savedBridge = localStorage.getItem(CLOUD_BRIDGE_CONFIG_KEY);
+      if (savedBridge) bridgeRaw = JSON.parse(savedBridge);
+    } catch {
+      // ignore
     }
-    return DEFAULT_TEMPLATE_SETTINGS;
+    return migrateTemplateSettings({ ...bridgeRaw, ...(sessRaw || {}) });
   });
 
   const [backupLogs, setBackupLogs] = useState<BackupLog[]>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.BACKUP_LOGS);
-    if (saved) {
-      try {
-        const parsed: BackupLog[] = JSON.parse(saved);
-        const seen = new Set<string>();
-        return parsed.map((item, idx) => {
-          let id = item.id;
-          if (!id || seen.has(id)) {
-            id = `${id || 'bk'}-${idx}-${Math.random().toString(36).substring(2, 7)}`;
-          }
-          seen.add(id);
-          return { ...item, id };
-        });
-      } catch {
-        // fallback
-      }
+    const parsed = readSessionJson<BackupLog[] | null>(SESSION_STORAGE_KEYS.BACKUP_LOGS, null);
+    if (parsed) {
+      const seen = new Set<string>();
+      return parsed.map((item, idx) => {
+        let id = item.id;
+        if (!id || seen.has(id)) {
+          id = `${id || 'bk'}-${idx}-${Math.random().toString(36).substring(2, 7)}`;
+        }
+        seen.add(id);
+        return { ...item, id };
+      });
     }
     return [
       {
         id: 'bk-init',
-        timestamp: '10:00:00 26/10/2026',
+        timestamp: new Date().toLocaleTimeString('vi-VN') + ' ' + new Date().toLocaleDateString('vi-VN'),
         action: 'KHỞI_TẠO_HỆ_THỐNG',
         status: 'SUCCESS',
         recordCounts: {
@@ -383,89 +445,254 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           medicines: INITIAL_MEDICINES.length,
           beneficiaries: INITIAL_BENEFICIARIES.length,
         },
-        details: 'Khởi tạo tự động đồng bộ Google Sheet & Drive sẵn sàng hoạt động.',
+        details: 'Sẵn sàng đồng bộ hai chiều 04 Sheet (kể cả Tài khoản) và Google Drive JSON.',
       },
     ];
   });
 
-  // Persist State to LocalStorage
+  // Synchronized live snapshot ref to eliminate stale closures during background two-way sync
+  const latestStateRef = useRef({
+    users,
+    currentUser,
+    beneficiaries,
+    medicines,
+    receipts,
+    issues,
+    prescriptions,
+    transactions,
+    auditLogs,
+    syncedFiles,
+    templateSettings,
+  });
+  latestStateRef.current = {
+    users,
+    currentUser,
+    beneficiaries,
+    medicines,
+    receipts,
+    issues,
+    prescriptions,
+    transactions,
+    auditLogs,
+    syncedFiles,
+    templateSettings,
+  };
+
+  // Persist ONLY temporary working session state to sessionStorage
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(users));
+    try {
+      sessionStorage.setItem(SESSION_STORAGE_KEYS.USERS, JSON.stringify(users));
+    } catch {}
   }, [users]);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(currentUser));
+    try {
+      sessionStorage.setItem(SESSION_STORAGE_KEYS.CURRENT_USER, JSON.stringify(currentUser));
+    } catch {}
   }, [currentUser]);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.IS_AUTHENTICATED, String(isAuthenticated));
+    try {
+      sessionStorage.setItem(SESSION_STORAGE_KEYS.IS_AUTHENTICATED, String(isAuthenticated));
+      if (isAuthenticated) {
+        const now = Date.now();
+        lastActivityRef.current = now;
+        sessionStorage.setItem(SESSION_STORAGE_KEYS.LAST_ACTIVITY, String(now));
+      } else {
+        sessionStorage.removeItem(SESSION_STORAGE_KEYS.LAST_ACTIVITY);
+      }
+    } catch {}
   }, [isAuthenticated]);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.BENEFICIARIES, JSON.stringify(beneficiaries));
+    try {
+      sessionStorage.setItem(SESSION_STORAGE_KEYS.BENEFICIARIES, JSON.stringify(beneficiaries));
+    } catch {}
   }, [beneficiaries]);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.MEDICINES, JSON.stringify(medicines));
+    try {
+      sessionStorage.setItem(SESSION_STORAGE_KEYS.MEDICINES, JSON.stringify(medicines));
+    } catch {}
   }, [medicines]);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.RECEIPTS, JSON.stringify(receipts));
+    try {
+      sessionStorage.setItem(SESSION_STORAGE_KEYS.RECEIPTS, JSON.stringify(receipts));
+    } catch {}
   }, [receipts]);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.ISSUES, JSON.stringify(issues));
+    try {
+      sessionStorage.setItem(SESSION_STORAGE_KEYS.ISSUES, JSON.stringify(issues));
+    } catch {}
   }, [issues]);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.PRESCRIPTIONS, JSON.stringify(prescriptions));
+    try {
+      sessionStorage.setItem(SESSION_STORAGE_KEYS.PRESCRIPTIONS, JSON.stringify(prescriptions));
+    } catch {}
   }, [prescriptions]);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.TRANSACTIONS, JSON.stringify(transactions));
+    try {
+      sessionStorage.setItem(SESSION_STORAGE_KEYS.TRANSACTIONS, JSON.stringify(transactions));
+    } catch {}
   }, [transactions]);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.AUDIT_LOGS, JSON.stringify(auditLogs));
+    try {
+      sessionStorage.setItem(SESSION_STORAGE_KEYS.AUDIT_LOGS, JSON.stringify(auditLogs));
+    } catch {}
   }, [auditLogs]);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.SYNCED_FILES, JSON.stringify(syncedFiles));
+    try {
+      sessionStorage.setItem(SESSION_STORAGE_KEYS.SYNCED_FILES, JSON.stringify(syncedFiles));
+    } catch {}
   }, [syncedFiles]);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.TEMPLATE_SETTINGS, JSON.stringify(templateSettings));
+    try {
+      sessionStorage.setItem(SESSION_STORAGE_KEYS.TEMPLATE_SETTINGS, JSON.stringify(templateSettings));
+      // Save only the lightweight endpoint discovery pointer in localStorage (no business or account data)
+      const cloudPointer = {
+        syncMode: templateSettings.syncMode,
+        appsScriptUrl: templateSettings.appsScriptUrl,
+        googleSheetUrl: templateSettings.googleSheetUrl,
+        googleSpreadsheetId: templateSettings.googleSpreadsheetId,
+        googleDriveFolder: templateSettings.googleDriveFolder,
+        autoBackupEnabled: templateSettings.autoBackupEnabled,
+        autoSyncOnTransaction: templateSettings.autoSyncOnTransaction,
+      };
+      localStorage.setItem(CLOUD_BRIDGE_CONFIG_KEY, JSON.stringify(cloudPointer));
+    } catch {}
   }, [templateSettings]);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.BACKUP_LOGS, JSON.stringify(backupLogs));
+    try {
+      sessionStorage.setItem(SESSION_STORAGE_KEYS.BACKUP_LOGS, JSON.stringify(backupLogs));
+    } catch {}
   }, [backupLogs]);
+
+  // Helper: Logout cleanly with optional notice
+  const logoutApp = useCallback((reason?: string) => {
+    const active = latestStateRef.current.currentUser;
+    setIsAuthenticated(false);
+    try {
+      sessionStorage.removeItem(SESSION_STORAGE_KEYS.IS_AUTHENTICATED);
+      sessionStorage.removeItem(SESSION_STORAGE_KEYS.LAST_ACTIVITY);
+    } catch {}
+    if (reason) {
+      setSessionNotice(reason);
+    }
+    if (active?.id) {
+      const logEntry: AuditLog = {
+        id: `log-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+        timestamp: new Date().toISOString(),
+        userId: active.id,
+        userName: active.fullName,
+        action: 'ĐĂNG_XUẤT',
+        entity: 'NGƯỜI_DÙNG',
+        entityId: active.id,
+        details: reason || `Cán bộ ${active.fullName} đã đăng xuất khỏi phiên làm việc`,
+      };
+      setAuditLogs((prev) => [logEntry, ...prev]);
+    }
+  }, []);
+
+  const clearSessionNotice = useCallback(() => setSessionNotice(null), []);
+
+  // Requirement 1: 60-minute (1-hour) Inactivity Auto-Logout Watchdog
+  useEffect(() => {
+    if (!isAuthenticated) {
+      setRemainingSessionSeconds(Math.floor(INACTIVITY_TIMEOUT_MS / 1000));
+      return;
+    }
+
+    let lastRecorded = Date.now();
+    lastActivityRef.current = lastRecorded;
+
+    const recordActivity = () => {
+      const now = Date.now();
+      if (now - lastActivityRef.current >= INACTIVITY_TIMEOUT_MS) {
+        logoutApp('Hệ thống tự động đăng xuất do không có thao tác trong 60 phút.');
+        return;
+      }
+      if (now - lastRecorded > 1000) {
+        lastRecorded = now;
+        lastActivityRef.current = now;
+        try {
+          sessionStorage.setItem(SESSION_STORAGE_KEYS.LAST_ACTIVITY, String(now));
+        } catch {}
+      }
+    };
+
+    const checkExpiration = () => {
+      const elapsed = Date.now() - lastActivityRef.current;
+      const rem = Math.max(0, Math.floor((INACTIVITY_TIMEOUT_MS - elapsed) / 1000));
+      setRemainingSessionSeconds(rem);
+      if (elapsed >= INACTIVITY_TIMEOUT_MS) {
+        logoutApp('Phiên làm việc đã tự động đăng xuất do không thao tác trên hệ thống quá 1 giờ.');
+      }
+    };
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        checkExpiration();
+      }
+    };
+
+    const events = ['mousemove', 'mousedown', 'keydown', 'scroll', 'touchstart', 'click', 'pointerdown'];
+    events.forEach((evt) => window.addEventListener(evt, recordActivity, { passive: true }));
+    document.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('focus', checkExpiration);
+
+    const timer = window.setInterval(checkExpiration, 1000);
+
+    return () => {
+      events.forEach((evt) => window.removeEventListener(evt, recordActivity));
+      document.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('focus', checkExpiration);
+      window.clearInterval(timer);
+    };
+  }, [isAuthenticated, logoutApp]);
 
   const updateTemplateSettings = (newSettings: Partial<TemplateSettings>) => {
     setTemplateSettings((prev) => {
-      const updated = { ...prev, ...newSettings };
+      const updated = migrateTemplateSettings({ ...prev, ...newSettings });
       if (newSettings.googleSheetUrl !== undefined) {
         const parsedId = extractSpreadsheetId(newSettings.googleSheetUrl);
         updated.googleSpreadsheetId = parsedId === GOOGLE_SAMPLE_READONLY_ID ? '' : parsedId;
       }
+      latestStateRef.current.templateSettings = updated;
       addAuditLog('CẤU_HÌNH', 'BIỂU_MẪU', 'TEMPLATE', 'Cập nhật cấu hình biểu mẫu mặc định của Trung tâm');
       return updated;
     });
   };
 
   const resetTemplateSettings = () => {
-    setTemplateSettings(DEFAULT_TEMPLATE_SETTINGS);
-    addAuditLog('KHÔI_PHỤC', 'BIỂU_MẪU', 'TEMPLATE', 'Khôi phục cấu hình biểu mẫu mặc định ban đầu');
+    const cleanDefault = migrateTemplateSettings(DEFAULT_TEMPLATE_SETTINGS);
+    setTemplateSettings((prev) => ({
+      ...cleanDefault,
+      appsScriptUrl: prev.appsScriptUrl,
+      googleSheetUrl: prev.googleSheetUrl,
+      googleSpreadsheetId: prev.googleSpreadsheetId,
+      googleDriveFolder: prev.googleDriveFolder,
+      syncMode: prev.syncMode,
+    }));
+    addAuditLog('KHÔI_PHỤC_BIỂU_MẪU', 'BIỂU_MẪU', 'TEMPLATE', 'Đặt lại nhãn chữ trên biểu mẫu về mặc định');
   };
 
-  // Google Sheets Auto-Sync States (Admin Only)
+  // Google Sheets Auto-Sync States
   const [googleUser, setGoogleUser] = useState<any>(null);
   const [isGoogleAuthenticated, setIsGoogleAuthenticated] = useState<boolean>(false);
   const [isSyncingSheets, setIsSyncingSheets] = useState<boolean>(false);
+  const [isPullingFromCloud, setIsPullingFromCloud] = useState<boolean>(false);
   const [syncSheetsError, setSyncSheetsError] = useState<string | null>(null);
   const [lastSheetsSyncResult, setLastSheetsSyncResult] = useState<GoogleSheetsSyncResult | null>(null);
 
-  // Initialize Firebase Auth listener
+  // Initialize Firebase Google OAuth listener
   useEffect(() => {
     const unsubscribe = initGoogleAuth((user, token) => {
       setGoogleUser(user);
@@ -480,18 +707,209 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return () => unsubscribe();
   }, []);
 
+  const buildSnapshotPayload = useCallback((): CloudStateSnapshot => {
+    const snap = latestStateRef.current;
+    return {
+      version: 2,
+      updatedAt: new Date().toISOString(),
+      updatedBy: snap.currentUser?.fullName || 'Hệ thống',
+      users: snap.users,
+      beneficiaries: snap.beneficiaries,
+      medicines: snap.medicines,
+      receipts: snap.receipts,
+      issues: snap.issues,
+      prescriptions: snap.prescriptions,
+      transactions: snap.transactions,
+      auditLogs: snap.auditLogs.slice(0, 100),
+      syncedFiles: snap.syncedFiles.slice(0, 100),
+      templateSettings: {
+        ...snap.templateSettings,
+      },
+    };
+  }, []);
+
+  // Bidirectional PULL from Google Sheets ("Tài khoản") & Google Drive (btxh_pharmacy_state.json)
+  const pullFromSheetsAndDrive = useCallback(async (silent = false): Promise<CloudPullResult> => {
+    const activeSettings = latestStateRef.current.templateSettings;
+    const hasAppsScript = isValidAppsScriptUrl(activeSettings.appsScriptUrl);
+    const token = await getAccessToken();
+
+    if (!hasAppsScript && !token) {
+      const msg = 'Chưa cấu hình URL Google Apps Script hoặc phiên Google OAuth để kéo dữ liệu hai chiều.';
+      if (!silent) setSyncSheetsError(msg);
+      return { success: false, error: msg };
+    }
+
+    setIsPullingFromCloud(true);
+    if (!silent) setSyncSheetsError(null);
+
+    try {
+      let accountRows: any[][] = [];
+      let stateJson: CloudStateSnapshot | null = null;
+      let pulledSheetId = activeSettings.googleSpreadsheetId || '';
+      let pulledSheetUrl = activeSettings.googleSheetUrl || '';
+      let timestamp = new Date().toLocaleTimeString('vi-VN') + ' ' + new Date().toLocaleDateString('vi-VN');
+
+      if (hasAppsScript) {
+        const res = await pullAllDataViaAppsScript(
+          activeSettings.appsScriptUrl,
+          activeSettings.googleDriveFolder || 'QUAN_LY_THUOC_TRUNG_TAM/2026'
+        );
+        if (!res.success) {
+          throw new Error(res.error || 'Không thể kéo dữ liệu qua Google Apps Script.');
+        }
+        accountRows = res.accountRows || [];
+        stateJson = res.stateJson || null;
+        if (res.spreadsheetId) pulledSheetId = res.spreadsheetId;
+        if (res.spreadsheetUrl) pulledSheetUrl = res.spreadsheetUrl;
+        if (res.timestamp) timestamp = res.timestamp;
+      } else if (token) {
+        if (pulledSheetId) {
+          accountRows = await readAccountSheetViaOAuth(token, pulledSheetId);
+        }
+        const driveRead = await readJsonFileFromGoogleDrive(
+          token,
+          activeSettings.googleDriveFolder || 'QUAN_LY_THUOC_TRUNG_TAM/2026',
+          DRIVE_STATE_FILENAME
+        );
+        if (driveRead.success && driveRead.content) {
+          stateJson = JSON.parse(driveRead.content) as CloudStateSnapshot;
+        }
+      }
+
+      let restoredFromDrive = false;
+
+      // 1. Apply Drive JSON full state snapshot first
+      if (stateJson && typeof stateJson === 'object') {
+        restoredFromDrive = true;
+        if (Array.isArray(stateJson.beneficiaries) && stateJson.beneficiaries.length > 0) {
+          latestStateRef.current.beneficiaries = stateJson.beneficiaries;
+          setBeneficiaries(stateJson.beneficiaries);
+        }
+        if (Array.isArray(stateJson.medicines) && stateJson.medicines.length > 0) {
+          latestStateRef.current.medicines = stateJson.medicines;
+          setMedicines(stateJson.medicines);
+        }
+        if (Array.isArray(stateJson.receipts)) {
+          latestStateRef.current.receipts = stateJson.receipts;
+          setReceipts(stateJson.receipts);
+        }
+        if (Array.isArray(stateJson.issues)) {
+          latestStateRef.current.issues = stateJson.issues;
+          setIssues(stateJson.issues);
+        }
+        if (Array.isArray(stateJson.prescriptions)) {
+          latestStateRef.current.prescriptions = stateJson.prescriptions;
+          setPrescriptions(stateJson.prescriptions);
+        }
+        if (Array.isArray(stateJson.transactions)) {
+          latestStateRef.current.transactions = stateJson.transactions;
+          setTransactions(stateJson.transactions);
+        }
+        if (Array.isArray(stateJson.auditLogs) && stateJson.auditLogs.length > 0) {
+          latestStateRef.current.auditLogs = stateJson.auditLogs;
+          setAuditLogs(stateJson.auditLogs);
+        }
+        if (Array.isArray(stateJson.syncedFiles)) {
+          latestStateRef.current.syncedFiles = stateJson.syncedFiles;
+          setSyncedFiles(stateJson.syncedFiles);
+        }
+        if (stateJson.templateSettings) {
+          setTemplateSettings((prev) => {
+            const merged = migrateTemplateSettings({
+              ...prev,
+              ...stateJson!.templateSettings,
+              appsScriptUrl: prev.appsScriptUrl || stateJson!.templateSettings.appsScriptUrl || '',
+              googleSpreadsheetId: pulledSheetId || prev.googleSpreadsheetId,
+              googleSheetUrl: pulledSheetUrl || prev.googleSheetUrl,
+            });
+            latestStateRef.current.templateSettings = merged;
+            return merged;
+          });
+        }
+      }
+
+      // 2. Parse Sheet "Tài khoản" (always authoritative for account status/role edits directly on Google Sheets)
+      const baseUsers = stateJson?.users && stateJson.users.length > 0 ? stateJson.users : latestStateRef.current.users;
+      const mergedUsers =
+        accountRows.length >= 2 ? parseUsersFromAccountSheet(accountRows, baseUsers) : baseUsers;
+
+      if (mergedUsers.length > 0) {
+        latestStateRef.current.users = mergedUsers;
+        setUsers(mergedUsers);
+        const cur = latestStateRef.current.currentUser;
+        const refreshedCur = mergedUsers.find((u) => u.id === cur?.id);
+        if (refreshedCur) {
+          latestStateRef.current.currentUser = refreshedCur;
+          setCurrentUser(refreshedCur);
+        }
+      }
+
+      setTemplateSettings((prev) => ({
+        ...prev,
+        googleSpreadsheetId: pulledSheetId || prev.googleSpreadsheetId,
+        googleSheetUrl: pulledSheetUrl || prev.googleSheetUrl,
+        lastBackupTime: timestamp,
+        lastBackupMessage: `Kéo đồng bộ 2 chiều từ Sheets & Drive (${mergedUsers.length} tài khoản${restoredFromDrive ? ', có JSON Drive' : ''})`,
+      }));
+
+      if (!silent) {
+        const snap = latestStateRef.current;
+        setBackupLogs((prev) => [
+          {
+            id: `bk-pull-${Date.now()}`,
+            timestamp,
+            action: 'KÉO_ĐỒNG_BỘ_HAI_CHIỀU',
+            status: 'SUCCESS',
+            recordCounts: {
+              receipts: snap.receipts.length,
+              issues: snap.issues.length,
+              medicines: snap.medicines.length,
+              beneficiaries: snap.beneficiaries.length,
+            },
+            details: `Đã tải ngược dữ liệu từ tab Tài khoản (${mergedUsers.length} user) và Drive JSON.`,
+          },
+          ...prev.slice(0, 49),
+        ]);
+      }
+
+      return {
+        success: true,
+        usersUpdated: mergedUsers.length,
+        restoredFromDrive,
+        timestamp,
+      };
+    } catch (err: any) {
+      const errMsg = err?.message || 'Lỗi khi đồng bộ ngược từ Google Sheets & Drive.';
+      if (!silent) setSyncSheetsError(errMsg);
+      return { success: false, error: errMsg };
+    } finally {
+      setIsPullingFromCloud(false);
+    }
+  }, []);
+
+  // Auto-pull latest Sheets ("Tài khoản") & Drive JSON on initial boot when Apps Script URL is configured
+  useEffect(() => {
+    if (isValidAppsScriptUrl(latestStateRef.current.templateSettings.appsScriptUrl)) {
+      pullFromSheetsAndDrive(true).catch(() => null);
+    }
+  }, [pullFromSheetsAndDrive]);
+
   const executeHybridSheetsSync = async (
     token: string | null,
     reason: string,
     settingsOverride?: TemplateSettings
   ): Promise<GoogleSheetsSyncResult | null> => {
-    if (currentUser?.role !== 'ADMIN') {
-      return null;
-    }
-
-    const activeSettings = settingsOverride || templateSettings;
+    const snap = latestStateRef.current;
+    const activeSettings = settingsOverride || snap.templateSettings;
     const syncMode = activeSettings.syncMode || 'HYBRID';
     const hasAppsScript = isValidAppsScriptUrl(activeSettings.appsScriptUrl);
+    const isAdmin = snap.currentUser?.role === 'ADMIN';
+
+    // Non-admin accounts only auto-sync when Apps Script bridge is linked
+    if (!isAdmin && !hasAppsScript) {
+      return null;
+    }
 
     setIsSyncingSheets(true);
     setSyncSheetsError(null);
@@ -499,8 +917,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try {
       let result: GoogleSheetsSyncResult | null = null;
       let usedChannel: 'APPS_SCRIPT' | 'OAUTH' = 'OAUTH';
+      const stateSnapshot = buildSnapshotPayload();
 
-      // Channel 1: Try Google Apps Script Web App Bridge first when enabled
+      // Channel 1: Google Apps Script Web App Bridge (4 sheets + Drive JSON snapshot)
       if (syncMode === 'APPS_SCRIPT' || (syncMode === 'HYBRID' && hasAppsScript)) {
         if (!hasAppsScript) {
           throw new Error(
@@ -511,12 +930,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         try {
           const gasResult = await syncAllDataViaAppsScript(
             activeSettings.appsScriptUrl,
-            beneficiaries,
-            receipts,
-            issues,
-            medicines,
-            transactions,
-            activeSettings
+            snap.beneficiaries,
+            snap.receipts,
+            snap.issues,
+            snap.medicines,
+            snap.transactions,
+            activeSettings,
+            snap.users,
+            stateSnapshot
           );
           usedChannel = 'APPS_SCRIPT';
           result = {
@@ -531,27 +952,39 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
       }
 
-      // Channel 2: Direct Google OAuth API fallback or primary
+      // Channel 2: Direct Google OAuth API fallback or primary (Admin OAuth)
       if (!result) {
         if (!token) {
           throw new Error(
-            'Chưa có phiên Google OAuth (token hết hạn sau tải lại trang) và chưa gắn URL Google Apps Script. Hãy bấm "Kết nối Google Sheets" hoặc cài đặt Apps Script để tự động đồng bộ không gián đoạn.'
+            'Chưa có phiên Google OAuth và chưa gắn URL Google Apps Script. Hãy cài đặt Apps Script hoặc đăng nhập Google OAuth để đồng bộ lên Sheets & Drive.'
           );
         }
         result = await syncAllDataToGoogleSheets(
           token,
-          beneficiaries,
-          receipts,
-          issues,
-          medicines,
-          transactions,
-          activeSettings
+          snap.beneficiaries,
+          snap.receipts,
+          snap.issues,
+          snap.medicines,
+          snap.transactions,
+          activeSettings,
+          snap.users
         );
+        // Also upsert full JSON state snapshot onto Google Drive
+        const driveStateRes = await upsertJsonFileInGoogleDrive(
+          token,
+          activeSettings.googleDriveFolder || 'QUAN_LY_THUOC_TRUNG_TAM/2026',
+          DRIVE_STATE_FILENAME,
+          JSON.stringify(stateSnapshot, null, 2)
+        );
+        if (driveStateRes.success) {
+          result.driveStateFileId = driveStateRes.fileId;
+          result.driveStateWebViewLink = driveStateRes.webViewLink;
+        }
         usedChannel = 'OAUTH';
       }
 
       setLastSheetsSyncResult(result);
-      const channelLabel = usedChannel === 'APPS_SCRIPT' ? 'Google Apps Script Bridge' : 'Google OAuth API';
+      const channelLabel = usedChannel === 'APPS_SCRIPT' ? 'Apps Script (4 Sheet + Drive)' : 'Google OAuth (4 Sheet + Drive)';
 
       setTemplateSettings((prev) => ({
         ...prev,
@@ -559,7 +992,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         googleSheetUrl: result!.spreadsheetUrl || prev.googleSheetUrl,
         lastSyncChannel: channelLabel,
         lastBackupTime: result!.timestamp,
-        lastBackupMessage: `${reason} (${result!.rowCounts.receipts} PNK, ${result!.rowCounts.issues} PXK, ${result!.rowCounts.reports} báo cáo) · ${channelLabel}`,
+        lastBackupMessage: `${reason} (${result!.rowCounts.receipts} PNK, ${result!.rowCounts.issues} PXK, ${result!.rowCounts.accounts ?? snap.users.length} tài khoản) · ${channelLabel}`,
       }));
 
       const newLog: BackupLog = {
@@ -568,12 +1001,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         action: reason,
         status: 'SUCCESS',
         recordCounts: {
-          receipts: receipts.length,
-          issues: issues.length,
-          medicines: medicines.length,
-          beneficiaries: beneficiaries.length,
+          receipts: snap.receipts.length,
+          issues: snap.issues.length,
+          medicines: snap.medicines.length,
+          beneficiaries: snap.beneficiaries.length,
         },
-        details: `Đồng bộ thành công qua ${channelLabel}: ${result.spreadsheetUrl}`,
+        details: `Đồng bộ 04 Sheet + Drive JSON thành công qua ${channelLabel}: ${result.spreadsheetUrl}`,
       };
       setBackupLogs((prev) => [newLog, ...prev.slice(0, 49)]);
 
@@ -589,10 +1022,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         action: reason,
         status: 'FAILED',
         recordCounts: {
-          receipts: receipts.length,
-          issues: issues.length,
-          medicines: medicines.length,
-          beneficiaries: beneficiaries.length,
+          receipts: snap.receipts.length,
+          issues: snap.issues.length,
+          medicines: snap.medicines.length,
+          beneficiaries: snap.beneficiaries.length,
         },
         details: `Lỗi đồng bộ Google Sheets: ${errMsg}`,
       };
@@ -662,14 +1095,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const syncNowToGoogleSheets = async (): Promise<GoogleSheetsSyncResult | null> => {
     if (currentUser?.role !== 'ADMIN') {
-      setSyncSheetsError('Chỉ tài khoản Quản trị viên (ADMIN) mới có quyền đồng bộ Google Sheets.');
+      setSyncSheetsError('Chỉ tài khoản Quản trị viên (ADMIN) mới có quyền đồng bộ thủ công.');
       return null;
     }
 
-    const hasAppsScript = isValidAppsScriptUrl(templateSettings.appsScriptUrl);
-    if (hasAppsScript && (templateSettings.syncMode === 'APPS_SCRIPT' || templateSettings.syncMode === 'HYBRID')) {
+    const activeSettings = latestStateRef.current.templateSettings;
+    const hasAppsScript = isValidAppsScriptUrl(activeSettings.appsScriptUrl);
+    if (hasAppsScript && (activeSettings.syncMode === 'APPS_SCRIPT' || activeSettings.syncMode === 'HYBRID')) {
       const token = await getAccessToken();
-      return executeHybridSheetsSync(token, 'Đồng bộ toàn bộ dữ liệu lên Google Sheets');
+      return executeHybridSheetsSync(token, 'Đồng bộ toàn bộ 04 Sheet & Drive JSON');
     }
 
     const token = await getAccessToken();
@@ -678,71 +1112,72 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (!res.success) return null;
       const newToken = await getAccessToken();
       if (!newToken) return null;
-      return executeHybridSheetsSync(newToken, 'Đồng bộ toàn bộ dữ liệu lên Google Sheets');
+      return executeHybridSheetsSync(newToken, 'Đồng bộ toàn bộ 04 Sheet & Drive JSON');
     }
-    return executeHybridSheetsSync(token, 'Đồng bộ toàn bộ dữ liệu lên Google Sheets');
+    return executeHybridSheetsSync(token, 'Đồng bộ toàn bộ 04 Sheet & Drive JSON');
   };
 
-  // Trigger Automatic Backup to Google Sheet & Drive (Cloud sync runs only for ADMIN)
+  // Trigger Automatic Bidirectional Backup to Google Sheets & Google Drive
   const triggerAutoBackup = (actionDescription: string) => {
+    const snap = latestStateRef.current;
     const timestamp = new Date().toLocaleTimeString('vi-VN') + ' ' + new Date().toLocaleDateString('vi-VN');
-    const isAdmin = currentUser?.role === 'ADMIN';
+    const hasAppsScript = isValidAppsScriptUrl(snap.templateSettings.appsScriptUrl);
+    const isAdmin = snap.currentUser?.role === 'ADMIN';
 
-    if (!isAdmin) {
-      return;
-    }
+    if (!snap.templateSettings.autoBackupEnabled) return;
+    if (!hasAppsScript && !isAdmin) return;
 
-    const hasAppsScript = isValidAppsScriptUrl(templateSettings.appsScriptUrl);
-
-    if (templateSettings.autoBackupEnabled) {
-      getAccessToken().then((token) => {
-        if (hasAppsScript || token) {
-          executeHybridSheetsSync(token, `Tự động cập nhật sau khi ${actionDescription}`).catch((err) => {
-            console.warn('Lỗi tự động sao lưu ngầm:', err);
-          });
-        } else {
-          const newLog: BackupLog = {
-            id: `bk-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-            timestamp,
-            action: actionDescription,
-            status: 'PENDING',
-            recordCounts: {
-              receipts: receipts.length,
-              issues: issues.length,
-              medicines: medicines.length,
-              beneficiaries: beneficiaries.length,
-            },
-            details: `Đã ghi nhận biến động (${actionDescription}). Cần gắn Apps Script URL hoặc kết nối Google OAuth để đẩy lên đám mây.`,
-          };
-          setBackupLogs((prev) => [newLog, ...prev.slice(0, 49)]);
-        }
-      });
-    }
+    getAccessToken().then((token) => {
+      if (hasAppsScript || (isAdmin && token)) {
+        executeHybridSheetsSync(token, `Tự động cập nhật: ${actionDescription}`).catch((err) => {
+          console.warn('Lỗi tự động sao lưu ngầm:', err);
+        });
+      } else if (isAdmin) {
+        const newLog: BackupLog = {
+          id: `bk-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+          timestamp,
+          action: actionDescription,
+          status: 'PENDING',
+          recordCounts: {
+            receipts: snap.receipts.length,
+            issues: snap.issues.length,
+            medicines: snap.medicines.length,
+            beneficiaries: snap.beneficiaries.length,
+          },
+          details: `Đã ghi nhận (${actionDescription}). Gắn URL Apps Script để mọi tài khoản tự động đồng bộ 04 Sheet & Drive JSON.`,
+        };
+        setBackupLogs((prev) => [newLog, ...prev.slice(0, 49)]);
+      }
+    });
   };
 
-  // Export Full Google Sheet Data (Optimized 03 Sheets: Phiếu nhập, Phiếu xuất, Báo cáo - 1 dòng / đối tượng)
+  // Export Full Google Sheet Data (04 Sheets: Phiếu nhập, Phiếu xuất, Báo cáo, Tài khoản)
   const exportFullGoogleSheetData = () => {
+    const snap = latestStateRef.current;
     downloadThreeSheetsExcelWorkbook(
-      beneficiaries,
-      receipts,
-      issues,
-      medicines,
-      transactions,
-      templateSettings
+      snap.beneficiaries,
+      snap.receipts,
+      snap.issues,
+      snap.medicines,
+      snap.transactions,
+      snap.templateSettings,
+      snap.users
     );
-    triggerAutoBackup('Xuất tệp sao lưu Google Sheets tối ưu 03 Sheet (.XLSX)');
+    triggerAutoBackup('Xuất tệp sao lưu Google Sheets 04 Sheet (.XLSX)');
   };
 
   const exportFullGoogleSheetCSV = () => {
+    const snap = latestStateRef.current;
     downloadThreeSheetsCSV(
-      beneficiaries,
-      receipts,
-      issues,
-      medicines,
-      transactions,
-      templateSettings
+      snap.beneficiaries,
+      snap.receipts,
+      snap.issues,
+      snap.medicines,
+      snap.transactions,
+      snap.templateSettings,
+      snap.users
     );
-    triggerAutoBackup('Xuất tệp sao lưu Google Sheets tối ưu 03 Sheet (.CSV)');
+    triggerAutoBackup('Xuất tệp sao lưu Google Sheets 04 Sheet (.CSV)');
   };
 
   const addAuditLog = (action: string, entity: string, entityId: string, details: string) => {
@@ -894,7 +1329,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // User Administration & RBAC Authentication
   const loginWithCredentials = (emailOrPhone: string, password?: string): { success: boolean; error?: string } => {
     const cleanInput = emailOrPhone.trim().toLowerCase();
-    const user = users.find(
+    const activeUsers = latestStateRef.current.users;
+    const user = activeUsers.find(
       (u) =>
         (cleanInput === 'admin' && u.role === 'ADMIN') ||
         u.email.toLowerCase() === cleanInput ||
@@ -911,7 +1347,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (user.status === 'PENDING_APPROVAL') {
       return {
         success: false,
-        error: 'Tài khoản đang chờ Ban Giám Đốc / Quản trị viên phê duyệt. Vui lòng liên hệ quản lý để kích hoạt.',
+        error: 'Tài khoản đang chờ Quản trị viên phê duyệt. Vui lòng liên hệ quản lý để kích hoạt.',
       };
     }
 
@@ -922,20 +1358,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
     }
 
-    // Verify password if set on user
-    if (user.password && password && user.password !== password) {
+    if (user.password && password !== user.password) {
       return { success: false, error: 'Mật khẩu không chính xác. Vui lòng kiểm tra lại.' };
     }
 
+    latestStateRef.current.currentUser = user;
     setCurrentUser(user);
+    setSessionNotice(null);
+    lastActivityRef.current = Date.now();
     setIsAuthenticated(true);
     addAuditLog('ĐĂNG_NHẬP', 'NGƯỜI_DÙNG', user.id, `Cán bộ ${user.fullName} (${user.role}) đăng nhập thành công`);
     return { success: true };
-  };
-
-  const logoutApp = () => {
-    setIsAuthenticated(false);
-    addAuditLog('ĐĂNG_XUẤT', 'NGƯỜI_DÙNG', currentUser.id, `Cán bộ ${currentUser.fullName} đã đăng xuất khỏi phiên làm việc`);
   };
 
   const registerNewAccount = (data: {
@@ -947,7 +1380,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     role: UserRole;
     autoApprove?: boolean;
   }): { success: boolean; message: string; user?: User } => {
-    const existing = users.find(
+    const existing = latestStateRef.current.users.find(
       (u) =>
         u.email.toLowerCase() === data.email.trim().toLowerCase() ||
         (data.phone && u.phone && u.phone.trim() === data.phone.trim())
@@ -967,22 +1400,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       phone: data.phone?.trim() || '',
       createdAt: getTodayISODate(),
       approvedAt: data.autoApprove ? getTodayISODate() : undefined,
-      approvedBy: data.autoApprove ? 'Tự động duyệt / Admin' : undefined,
+      approvedBy: data.autoApprove ? 'Quản trị viên' : undefined,
     };
 
-    setUsers((prev) => [...prev, newUser]);
+    const nextUsers = [...latestStateRef.current.users, newUser];
+    latestStateRef.current.users = nextUsers;
+    setUsers(nextUsers);
+
     addAuditLog(
       'ĐĂNG_KÝ',
       'NGƯỜI_DÙNG',
       newUser.id,
       `Tài khoản mới ${newUser.fullName} (${newUser.role}) đăng ký ${data.autoApprove ? 'và được kích hoạt' : 'chờ duyệt'}`
     );
+    triggerAutoBackup(`Đăng ký tài khoản ${newUser.fullName} lên tab Tài khoản`);
 
     return {
       success: true,
       message: data.autoApprove
-        ? 'Đăng ký thành công! Bạn có thể đăng nhập ngay bằng tài khoản này.'
-        : 'Đăng ký thành công! Hồ sơ đã được chuyển tới Ban Giám Đốc/Quản trị viên để phê duyệt cấp quyền.',
+        ? 'Đăng ký thành công! Tài khoản đã sẵn sàng đăng nhập.'
+        : 'Đăng ký thành công! Hồ sơ đã được ghi nhận và chuyển tới Quản trị viên phê duyệt.',
       user: newUser,
     };
   };
@@ -991,6 +1428,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!currentUser || !currentUser.role) return false;
     const permissions = ROLE_PERMISSIONS[currentUser.role];
     return !!permissions?.[permission];
+  };
+
+  // Requirement 3: Admin can edit/delete all; staff can only edit/delete vouchers they created
+  const canModifyReceipt = (receipt: StockReceipt, action: 'edit' | 'delete'): boolean => {
+    if (!currentUser) return false;
+    if (currentUser.role === 'ADMIN') return true;
+    const permOk = action === 'edit' ? hasPermission('canEditReceipt') : hasPermission('canDeleteReceipt');
+    return permOk && receipt.createdBy === currentUser.id;
+  };
+
+  const canModifyIssue = (issue: StockIssue, action: 'edit' | 'delete'): boolean => {
+    if (!currentUser) return false;
+    if (currentUser.role === 'ADMIN') return true;
+    const permOk = action === 'edit' ? hasPermission('canEditIssue') : hasPermission('canDeleteIssue');
+    return permOk && issue.createdBy === currentUser.id;
   };
 
   const registerUser = (email: string, fullName: string, department: string, phone: string, requestedRole: UserRole) => {
@@ -1005,64 +1457,69 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const approveUser = (userId: string, role: UserRole) => {
-    setUsers((prev) =>
-      prev.map((u) => {
-        if (u.id === userId) {
-          const updated: User = {
-            ...u,
-            status: 'ACTIVE',
-            role,
-            approvedAt: getTodayISODate(),
-            approvedBy: currentUser.fullName,
-          };
-          addAuditLog('PHÊ_DUYỆT', 'NGƯỜI_DÙNG', u.id, `Phê duyệt tài khoản ${u.fullName} với vai trò ${role}`);
-          return updated;
-        }
-        return u;
-      })
-    );
+    const nextUsers = latestStateRef.current.users.map((u) => {
+      if (u.id === userId) {
+        const updated: User = {
+          ...u,
+          status: 'ACTIVE',
+          role,
+          approvedAt: getTodayISODate(),
+          approvedBy: currentUser.fullName,
+        };
+        addAuditLog('PHÊ_DUYỆT', 'NGƯỜI_DÙNG', u.id, `Phê duyệt tài khoản ${u.fullName} với vai trò ${role}`);
+        return updated;
+      }
+      return u;
+    });
+    latestStateRef.current.users = nextUsers;
+    setUsers(nextUsers);
+    triggerAutoBackup('Phê duyệt tài khoản cán bộ');
   };
 
   const rejectUser = (userId: string) => {
-    setUsers((prev) =>
-      prev.map((u) => {
-        if (u.id === userId) {
-          const updated: User = { ...u, status: 'REJECTED' };
-          addAuditLog('TỪ_CHỐI', 'NGƯỜI_DÙNG', u.id, `Từ chối cấp quyền tài khoản ${u.fullName}`);
-          return updated;
-        }
-        return u;
-      })
-    );
+    const nextUsers = latestStateRef.current.users.map((u) => {
+      if (u.id === userId) {
+        const updated: User = { ...u, status: 'REJECTED' };
+        addAuditLog('TỪ_CHỐI', 'NGƯỜI_DÙNG', u.id, `Từ chối cấp quyền tài khoản ${u.fullName}`);
+        return updated;
+      }
+      return u;
+    });
+    latestStateRef.current.users = nextUsers;
+    setUsers(nextUsers);
+    triggerAutoBackup('Từ chối tài khoản đăng ký');
   };
 
   const changeUserRole = (userId: string, role: UserRole) => {
-    setUsers((prev) =>
-      prev.map((u) => {
-        if (u.id === userId) {
-          const updated: User = { ...u, role };
-          addAuditLog('PHÂN_QUYỀN', 'NGƯỜI_DÙNG', u.id, `Thay đổi vai trò của cán bộ ${u.fullName} thành ${role}`);
-          if (currentUser.id === userId) {
-            setCurrentUser(updated);
-          }
-          return updated;
+    const nextUsers = latestStateRef.current.users.map((u) => {
+      if (u.id === userId) {
+        const updated: User = { ...u, role };
+        addAuditLog('PHÂN_QUYỀN', 'NGƯỜI_DÙNG', u.id, `Thay đổi vai trò của cán bộ ${u.fullName} thành ${role}`);
+        if (currentUser.id === userId) {
+          latestStateRef.current.currentUser = updated;
+          setCurrentUser(updated);
         }
-        return u;
-      })
-    );
+        return updated;
+      }
+      return u;
+    });
+    latestStateRef.current.users = nextUsers;
+    setUsers(nextUsers);
+    triggerAutoBackup('Cập nhật vai trò tài khoản');
   };
 
   const toggleUserStatus = (userId: string, status: UserStatus) => {
-    setUsers((prev) =>
-      prev.map((u) => {
-        if (u.id === userId) {
-          const updated: User = { ...u, status };
-          addAuditLog('TRẠNG_THÁI', 'NGƯỜI_DÙNG', u.id, `Đổi trạng thái tài khoản ${u.fullName} sang ${status}`);
-          return updated;
-        }
-        return u;
-      })
-    );
+    const nextUsers = latestStateRef.current.users.map((u) => {
+      if (u.id === userId) {
+        const updated: User = { ...u, status };
+        addAuditLog('TRẠNG_THÁI', 'NGƯỜI_DÙNG', u.id, `Đổi trạng thái tài khoản ${u.fullName} sang ${status}`);
+        return updated;
+      }
+      return u;
+    });
+    latestStateRef.current.users = nextUsers;
+    setUsers(nextUsers);
+    triggerAutoBackup('Thay đổi trạng thái khóa/mở tài khoản');
   };
 
   const updateUserAccount = (
@@ -1081,7 +1538,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return { success: false, error: 'Chỉ Quản trị viên (ADMIN) mới có quyền chỉnh sửa tài khoản cán bộ.' };
     }
 
-    const target = users.find((u) => u.id === userId);
+    const target = latestStateRef.current.users.find((u) => u.id === userId);
     if (!target) {
       return { success: false, error: 'Không tìm thấy tài khoản cán bộ.' };
     }
@@ -1091,7 +1548,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return { success: false, error: 'Địa chỉ Email không hợp lệ.' };
     }
 
-    const duplicate = users.find(
+    const duplicate = latestStateRef.current.users.find(
       (u) => u.id !== userId && u.email.toLowerCase() === nextEmail.toLowerCase()
     );
     if (duplicate) {
@@ -1118,9 +1575,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         updates.status === 'ACTIVE' && !target.approvedBy ? currentUser.fullName : target.approvedBy,
     };
 
-    setUsers((prev) => prev.map((u) => (u.id === userId ? updatedUser : u)));
+    const nextUsers = latestStateRef.current.users.map((u) => (u.id === userId ? updatedUser : u));
+    latestStateRef.current.users = nextUsers;
+    setUsers(nextUsers);
 
     if (currentUser.id === userId) {
+      latestStateRef.current.currentUser = updatedUser;
       setCurrentUser(updatedUser);
     }
 
@@ -1131,6 +1591,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       updatedUser.id,
       `Quản trị viên cập nhật toàn bộ thông tin cán bộ ${updatedUser.fullName} (${updatedUser.email}, vai trò ${updatedUser.role}, trạng thái ${updatedUser.status})${resetNote}`
     );
+    triggerAutoBackup(`Cập nhật hồ sơ tài khoản ${updatedUser.fullName}`);
 
     return { success: true };
   };
@@ -1165,7 +1626,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       items: receiptItems,
     };
 
-    // Create Stock Transactions
     const newTransactions: StockTransaction[] = receiptItems.map((item, idx) => ({
       id: `tx-rcp-${Date.now()}-${idx}`,
       date: newReceipt.receiptDate,
@@ -1181,8 +1641,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       createdAt: new Date().toISOString(),
     }));
 
-    setReceipts((prev) => [newReceipt, ...prev]);
-    setTransactions((prev) => [...prev, ...newTransactions]);
+    const nextReceipts = [newReceipt, ...latestStateRef.current.receipts];
+    const nextTransactions = [...latestStateRef.current.transactions, ...newTransactions];
+    latestStateRef.current.receipts = nextReceipts;
+    latestStateRef.current.transactions = nextTransactions;
+
+    setReceipts(nextReceipts);
+    setTransactions(nextTransactions);
 
     addAuditLog(
       'NHẬP_KHO',
@@ -1200,10 +1665,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     receiptId: string,
     receiptData: Partial<StockReceipt>,
     itemsData: Omit<StockReceiptItem, 'id' | 'receiptId' | 'totalPrice'>[]
-  ): StockReceipt => {
+  ): { success: boolean; receipt?: StockReceipt; error?: string } => {
+    const existing = latestStateRef.current.receipts.find((r) => r.id === receiptId);
+    if (!existing) {
+      return { success: false, error: 'Không tìm thấy phiếu nhập kho cần hiệu chỉnh.' };
+    }
+
+    if (!canModifyReceipt(existing, 'edit')) {
+      const msg = `Chỉ tài khoản tạo phiếu (${existing.createdByName}) hoặc Quản trị viên (Admin) mới được chỉnh sửa phiếu nhập ${existing.receiptCode}.`;
+      addAuditLog('TỪ_CHỐI_SỬA', 'PHIẾU_NHẬP', existing.receiptCode, msg);
+      return { success: false, error: msg };
+    }
+
     let totalAmount = 0;
-    const existing = receipts.find((r) => r.id === receiptId);
-    const receiptCode = receiptData.receiptCode || existing?.receiptCode || '';
+    const receiptCode = receiptData.receiptCode || existing.receiptCode;
 
     const receiptItems: StockReceiptItem[] = itemsData.map((item, index) => {
       const totalPrice = item.actualQuantity * item.unitPrice;
@@ -1217,17 +1692,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
 
     const updatedReceipt: StockReceipt = {
-      ...(existing || {}),
+      ...existing,
       ...receiptData,
       id: receiptId,
       receiptCode,
       totalAmount,
+      createdBy: existing.createdBy,
+      createdByName: existing.createdByName,
       items: receiptItems,
-    } as StockReceipt;
+    };
 
-    // Replace transactions for this receipt
-    const oldRefCode = existing?.receiptCode;
-    const remainingTransactions = transactions.filter(
+    const oldRefCode = existing.receiptCode;
+    const remainingTransactions = latestStateRef.current.transactions.filter(
       (t) => t.refCode !== oldRefCode && t.refCode !== receiptCode
     );
 
@@ -1246,8 +1722,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       createdAt: new Date().toISOString(),
     }));
 
-    setReceipts((prev) => prev.map((r) => (r.id === receiptId ? updatedReceipt : r)));
-    setTransactions([...remainingTransactions, ...newTransactions]);
+    const nextReceipts = latestStateRef.current.receipts.map((r) => (r.id === receiptId ? updatedReceipt : r));
+    const nextTransactions = [...remainingTransactions, ...newTransactions];
+    latestStateRef.current.receipts = nextReceipts;
+    latestStateRef.current.transactions = nextTransactions;
+
+    setReceipts(nextReceipts);
+    setTransactions(nextTransactions);
 
     addAuditLog(
       'HIỆU_CHỈNH',
@@ -1258,14 +1739,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     triggerAutoBackup(`Hiệu chỉnh phiếu nhập kho ${updatedReceipt.receiptCode}`);
 
-    return updatedReceipt;
+    return { success: true, receipt: updatedReceipt };
   };
 
-  const deleteStockReceipt = (receiptId: string) => {
-    const existing = receipts.find((r) => r.id === receiptId);
-    if (!existing) return;
-    setReceipts((prev) => prev.filter((r) => r.id !== receiptId));
-    setTransactions((prev) => prev.filter((t) => t.refCode !== existing.receiptCode));
+  const deleteStockReceipt = (receiptId: string): { success: boolean; error?: string } => {
+    const existing = latestStateRef.current.receipts.find((r) => r.id === receiptId);
+    if (!existing) {
+      return { success: false, error: 'Không tìm thấy phiếu nhập kho.' };
+    }
+    if (!canModifyReceipt(existing, 'delete')) {
+      const msg = `Chỉ tài khoản tạo phiếu (${existing.createdByName}) hoặc Quản trị viên (Admin) mới được xóa phiếu nhập ${existing.receiptCode}.`;
+      addAuditLog('TỪ_CHỐI_XÓA', 'PHIẾU_NHẬP', existing.receiptCode, msg);
+      return { success: false, error: msg };
+    }
+
+    const nextReceipts = latestStateRef.current.receipts.filter((r) => r.id !== receiptId);
+    const nextTransactions = latestStateRef.current.transactions.filter((t) => t.refCode !== existing.receiptCode);
+    latestStateRef.current.receipts = nextReceipts;
+    latestStateRef.current.transactions = nextTransactions;
+
+    setReceipts(nextReceipts);
+    setTransactions(nextTransactions);
     addAuditLog(
       'XÓA_CHỨNG_TỪ',
       'PHIẾU_NHẬP',
@@ -1273,14 +1767,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       `Xóa phiếu nhập kho ${existing.receiptCode}`
     );
     triggerAutoBackup(`Xóa phiếu nhập kho ${existing.receiptCode}`);
+    return { success: true };
   };
 
-  // Stock Issue Management (with atomic stock validation!)
+  // Stock Issue Management (with atomic stock validation & creator ownership)
   const createStockIssue = (
     issueData: Omit<StockIssue, 'id' | 'totalAmount' | 'createdBy' | 'createdByName' | 'createdAt' | 'status'>,
     itemsData: Omit<StockIssueItem, 'id' | 'issueId' | 'totalPrice'>[]
   ): { success: boolean; issue?: StockIssue; error?: string } => {
-    // 1. Stock availability validation
     const availableLots = getAvailableLots();
 
     for (const item of itemsData) {
@@ -1322,7 +1816,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       items: issueItems,
     };
 
-    // Create negative stock transactions
     const newTransactions: StockTransaction[] = issueItems.map((item, idx) => ({
       id: `tx-iss-${Date.now()}-${idx}`,
       date: newIssue.issueDate,
@@ -1338,8 +1831,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       createdAt: new Date().toISOString(),
     }));
 
-    setIssues((prev) => [newIssue, ...prev]);
-    setTransactions((prev) => [...prev, ...newTransactions]);
+    const nextIssues = [newIssue, ...latestStateRef.current.issues];
+    const nextTransactions = [...latestStateRef.current.transactions, ...newTransactions];
+    latestStateRef.current.issues = nextIssues;
+    latestStateRef.current.transactions = nextTransactions;
+
+    setIssues(nextIssues);
+    setTransactions(nextTransactions);
 
     addAuditLog(
       'XUẤT_KHO',
@@ -1358,12 +1856,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     issueData: Partial<StockIssue>,
     itemsData: Omit<StockIssueItem, 'id' | 'issueId' | 'totalPrice'>[]
   ): { success: boolean; issue?: StockIssue; error?: string } => {
-    const existing = issues.find((i) => i.id === issueId);
-    const issueCode = issueData.issueCode || existing?.issueCode || '';
+    const existing = latestStateRef.current.issues.find((i) => i.id === issueId);
+    if (!existing) {
+      return { success: false, error: 'Không tìm thấy phiếu xuất kho cần hiệu chỉnh.' };
+    }
 
-    // Calculate temporary available lots without this issue's existing transactions
-    const otherTransactions = transactions.filter(
-      (t) => t.refCode !== existing?.issueCode && t.refCode !== issueCode
+    if (!canModifyIssue(existing, 'edit')) {
+      const msg = `Chỉ tài khoản tạo phiếu (${existing.createdByName}) hoặc Quản trị viên (Admin) mới được chỉnh sửa phiếu xuất ${existing.issueCode}.`;
+      addAuditLog('TỪ_CHỐI_SỬA', 'PHIẾU_XUẤT', existing.issueCode, msg);
+      return { success: false, error: msg };
+    }
+
+    const issueCode = issueData.issueCode || existing.issueCode;
+
+    const otherTransactions = latestStateRef.current.transactions.filter(
+      (t) => t.refCode !== existing.issueCode && t.refCode !== issueCode
     );
 
     const lotMap = new Map<string, number>();
@@ -1397,13 +1904,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
 
     const updatedIssue: StockIssue = {
-      ...(existing || {}),
+      ...existing,
       ...issueData,
       id: issueId,
       issueCode,
       totalAmount,
+      createdBy: existing.createdBy,
+      createdByName: existing.createdByName,
       items: issueItems,
-    } as StockIssue;
+    };
 
     const newTransactions: StockTransaction[] = issueItems.map((item, idx) => ({
       id: `tx-iss-${Date.now()}-${idx}`,
@@ -1420,8 +1929,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       createdAt: new Date().toISOString(),
     }));
 
-    setIssues((prev) => prev.map((i) => (i.id === issueId ? updatedIssue : i)));
-    setTransactions([...otherTransactions, ...newTransactions]);
+    const nextIssues = latestStateRef.current.issues.map((i) => (i.id === issueId ? updatedIssue : i));
+    const nextTransactions = [...otherTransactions, ...newTransactions];
+    latestStateRef.current.issues = nextIssues;
+    latestStateRef.current.transactions = nextTransactions;
+
+    setIssues(nextIssues);
+    setTransactions(nextTransactions);
 
     addAuditLog(
       'HIỆU_CHỈNH',
@@ -1435,11 +1949,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return { success: true, issue: updatedIssue };
   };
 
-  const deleteStockIssue = (issueId: string) => {
-    const existing = issues.find((i) => i.id === issueId);
-    if (!existing) return;
-    setIssues((prev) => prev.filter((i) => i.id !== issueId));
-    setTransactions((prev) => prev.filter((t) => t.refCode !== existing.issueCode));
+  const deleteStockIssue = (issueId: string): { success: boolean; error?: string } => {
+    const existing = latestStateRef.current.issues.find((i) => i.id === issueId);
+    if (!existing) {
+      return { success: false, error: 'Không tìm thấy phiếu xuất kho.' };
+    }
+    if (!canModifyIssue(existing, 'delete')) {
+      const msg = `Chỉ tài khoản tạo phiếu (${existing.createdByName}) hoặc Quản trị viên (Admin) mới được xóa phiếu xuất ${existing.issueCode}.`;
+      addAuditLog('TỪ_CHỐI_XÓA', 'PHIẾU_XUẤT', existing.issueCode, msg);
+      return { success: false, error: msg };
+    }
+
+    const nextIssues = latestStateRef.current.issues.filter((i) => i.id !== issueId);
+    const nextTransactions = latestStateRef.current.transactions.filter((t) => t.refCode !== existing.issueCode);
+    latestStateRef.current.issues = nextIssues;
+    latestStateRef.current.transactions = nextTransactions;
+
+    setIssues(nextIssues);
+    setTransactions(nextTransactions);
     addAuditLog(
       'XÓA_CHỨNG_TỪ',
       'PHIẾU_XUẤT',
@@ -1447,6 +1974,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       `Xóa phiếu xuất kho ${existing.issueCode}`
     );
     triggerAutoBackup(`Xóa phiếu xuất kho ${existing.issueCode}`);
+    return { success: true };
   };
 
   // Prescription Management
@@ -1856,25 +2384,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       'LƯU_TRỮ_DRIVE',
       'TÀI_LIỆU',
       docCode,
-      `Đã lưu chứng từ ${safeFileName} vào ${driveFolder} (${uploadChannel === 'APPS_SCRIPT' ? 'Google Apps Script Drive' : uploadChannel === 'OAUTH_DRIVE_V3' ? 'Google Drive API v3' : 'Hàng đợi cục bộ'})`
+      `Đã lưu chứng từ ${safeFileName} vào ${driveFolder} (${uploadChannel === 'APPS_SCRIPT' ? 'Google Apps Script Drive' : uploadChannel === 'OAUTH_DRIVE_V3' ? 'Google Drive API v3' : 'Phiên tạm'})`
     );
 
     return newSyncFile;
-  };
-
-  const resetAllData = () => {
-    localStorage.clear();
-    setUsers(INITIAL_USERS);
-    setCurrentUser(INITIAL_USERS[2]);
-    setBeneficiaries(INITIAL_BENEFICIARIES);
-    setMedicines(INITIAL_MEDICINES);
-    setReceipts(INITIAL_STOCK_RECEIPTS);
-    setIssues(INITIAL_STOCK_ISSUES);
-    setPrescriptions(INITIAL_PRESCRIPTIONS);
-    setTransactions(INITIAL_TRANSACTIONS);
-    setAuditLogs([]);
-    setSyncedFiles([]);
-    window.location.reload();
   };
 
   return (
@@ -1896,11 +2409,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         googleUser,
         isGoogleAuthenticated,
         isSyncingSheets,
+        isPullingFromCloud,
         syncSheetsError,
         lastSheetsSyncResult,
         loginWithGoogle,
         logoutFromGoogle,
         syncNowToGoogleSheets,
+        pullFromSheetsAndDrive,
         testAppsScriptSync,
         updateTemplateSettings,
         resetTemplateSettings,
@@ -1908,17 +2423,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         exportFullGoogleSheetData,
         exportFullGoogleSheetCSV,
         isAuthenticated,
+        sessionNotice,
+        clearSessionNotice,
+        remainingSessionSeconds,
         setCurrentUser,
         loginWithCredentials,
         logoutApp,
         registerNewAccount,
         hasPermission,
-        changeUserRole,
-        toggleUserStatus,
-        updateUserAccount,
+        canModifyReceipt,
+        canModifyIssue,
         registerUser,
         approveUser,
         rejectUser,
+        changeUserRole,
+        toggleUserStatus,
+        updateUserAccount,
         addMedicine,
         updateMedicine,
         addBeneficiary,
@@ -1936,7 +2456,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         getLowStockMedicines,
         calculateBeneficiaryReport,
         syncDocumentToDrive,
-        resetAllData,
       }}
     >
       {children}

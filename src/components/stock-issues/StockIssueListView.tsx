@@ -6,7 +6,7 @@
 import React, { useState, useMemo } from 'react';
 import { useApp } from '../../context/AppContext';
 import { StockIssue, StockIssueItem, LotStock, StockReceipt } from '../../types';
-import { Plus, Search, Edit2, Printer, Trash2, AlertTriangle, CheckCircle2, RefreshCw, FileText, Sparkles } from 'lucide-react';
+import { Plus, Search, Edit2, Printer, Trash2, AlertTriangle, RefreshCw, Sparkles, Lock } from 'lucide-react';
 import { Modal } from '../common/Modal';
 import { PrintModal, PrintDocumentType } from '../print/PrintModal';
 import { formatCurrency, formatNumber, formatDate, getTodayISODate } from '../../utils/formatters';
@@ -23,19 +23,19 @@ export const StockIssueListView: React.FC = () => {
     deleteStockIssue,
     getAvailableLots,
     hasPermission,
+    canModifyIssue,
     currentUser,
     templateSettings,
   } = useApp();
 
   const canCreateIssue = hasPermission('canCreateIssue');
-  const canEditIssue = hasPermission('canEditIssue');
-  const canDeleteIssue = hasPermission('canDeleteIssue');
 
   const [searchTerm, setSearchTerm] = useState('');
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingIssue, setEditingIssue] = useState<StockIssue | null>(null);
   const [printDocument, setPrintDocument] = useState<PrintDocumentType | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [listError, setListError] = useState<string | null>(null);
 
   // Form State
   const [issueDate, setIssueDate] = useState(getTodayISODate());
@@ -263,8 +263,12 @@ export const StockIssueListView: React.FC = () => {
   };
 
   const handleDelete = (issue: StockIssue) => {
+    setListError(null);
     if (window.confirm(`Bạn có chắc chắn muốn xóa phiếu xuất kho "${issue.issueCode}"? Số lượng thuốc sẽ được hoàn trả lại tồn kho.`)) {
-      deleteStockIssue(issue.id);
+      const res = deleteStockIssue(issue.id);
+      if (!res.success && res.error) {
+        setListError(res.error);
+      }
     }
   };
 
@@ -374,8 +378,8 @@ export const StockIssueListView: React.FC = () => {
   return (
     <div className="space-y-4">
       {/* Header and Actions */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white p-4 rounded-xl border border-slate-200 shadow-2xs">
-        <div>
+      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 bg-white p-4 rounded-xl border border-slate-200 shadow-2xs">
+        <div className="min-w-0">
           <h2 className="font-bold text-slate-900 text-base">
             Quản Lý {templateSettings.issueTitle} ({templateSettings.issueFormCode})
           </h2>
@@ -384,8 +388,8 @@ export const StockIssueListView: React.FC = () => {
           </p>
         </div>
 
-        <div className="flex items-center gap-3">
-          <div className="relative w-64">
+        <div className="flex flex-col sm:flex-row sm:items-center gap-2.5 w-full lg:w-auto">
+          <div className="relative w-full sm:w-64">
             <Search className="w-4 h-4 absolute left-3 top-2.5 text-slate-400" />
             <input
               type="text"
@@ -400,7 +404,7 @@ export const StockIssueListView: React.FC = () => {
             onClick={handleOpenCreateModal}
             disabled={!canCreateIssue}
             title={canCreateIssue ? 'Lập phiếu xuất kho mới' : `Vai trò ${currentUser.role} không có quyền lập phiếu xuất kho`}
-            className={`flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold shadow-xs transition-colors shrink-0 ${
+            className={`flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold shadow-xs transition-colors shrink-0 whitespace-nowrap ${
               canCreateIssue
                 ? 'bg-teal-600 hover:bg-teal-700 text-white'
                 : 'bg-slate-200 text-slate-400 cursor-not-allowed'
@@ -412,24 +416,32 @@ export const StockIssueListView: React.FC = () => {
         </div>
       </div>
 
+      {listError && (
+        <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-800 text-xs flex items-center gap-2">
+          <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+          <span>{listError}</span>
+        </div>
+      )}
+
       {!canCreateIssue && (
-        <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-slate-600 text-xs flex items-center justify-between">
+        <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-slate-600 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-1.5">
           <span>
-            Chế độ <strong>Chỉ Xem & In Ấn</strong> (Vai trò: {currentUser.fullName} - {currentUser.role}). Bạn chỉ có thể tra cứu và in phiếu.
+            Chế độ <strong>Chỉ Xem &amp; In Ấn</strong> (Tài khoản: {currentUser.fullName} - {currentUser.role}). Bạn chỉ có thể tra cứu và in phiếu.
           </span>
-          <span className="text-[11px] text-teal-700 font-semibold">Chỉ Dược sĩ, Bác sĩ & Admin có quyền lập phiếu xuất</span>
+          <span className="text-[11px] text-teal-700 font-semibold">Chỉ người tạo phiếu (hoặc Admin) được sửa/xóa chứng từ</span>
         </div>
       )}
 
       {/* Issues Table */}
       <div className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-2xs">
-        <table className="w-full text-xs text-left border-collapse">
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[820px] text-xs text-left border-collapse">
           <thead className="bg-slate-50 border-b border-slate-200 text-slate-600 font-semibold uppercase text-2xs">
             <tr>
               <th className="py-3 px-4">Số chứng từ</th>
               <th className="py-3 px-4">Ngày xuất</th>
               <th className="py-3 px-4">Người nhận hàng / Bộ phận</th>
-              <th className="py-3 px-4">Đối tượng nhận thuốc</th>
+              <th className="py-3 px-4">Đối tượng / Người lập</th>
               <th className="py-3 px-4">Lý do xuất kho</th>
               <th className="py-3 px-4 text-right">Tổng tiền (₫)</th>
               <th className="py-3 px-4 text-center">Thao tác / Hiệu chỉnh</th>
@@ -438,6 +450,9 @@ export const StockIssueListView: React.FC = () => {
           <tbody className="divide-y divide-slate-100">
             {filteredIssues.map((issue) => {
               const ben = beneficiaries.find((b) => b.id === issue.beneficiaryId);
+              const canEditRow = canModifyIssue(issue, 'edit');
+              const canDeleteRow = canModifyIssue(issue, 'delete');
+              const isOwner = issue.createdBy === currentUser.id;
               return (
                 <tr key={issue.id} className="hover:bg-slate-50/80 transition-colors">
                   <td className="py-3 px-4 font-mono font-bold text-slate-900">{issue.issueCode}</td>
@@ -451,6 +466,10 @@ export const StockIssueListView: React.FC = () => {
                     <div className="text-2xs text-slate-400 font-mono">
                       {ben?.code || 'DT-Tự do'} {ben?.insuranceNumber ? `· BHYT: ${ben?.insuranceNumber}` : ''}
                     </div>
+                    <div className="text-2xs text-slate-500 mt-0.5">
+                      Người lập: <span className="font-medium text-slate-700">{issue.createdByName || 'Hệ thống'}</span>
+                      {isOwner && <span className="ml-1 text-teal-700 font-semibold">(Của tôi)</span>}
+                    </div>
                   </td>
                   <td className="py-3 px-4 text-slate-700 max-w-xs truncate">{issue.reason}</td>
                   <td className="py-3 px-4 text-right font-mono font-bold text-slate-900">
@@ -458,7 +477,7 @@ export const StockIssueListView: React.FC = () => {
                   </td>
                   <td className="py-3 px-4 text-center">
                     <div className="flex items-center justify-center gap-1.5">
-                      {canEditIssue ? (
+                      {canEditRow ? (
                         <button
                           onClick={() => handleOpenEditModal(issue)}
                           className="flex items-center gap-1 px-2.5 py-1 text-teal-700 hover:bg-teal-50 border border-teal-200 rounded-md text-2xs font-semibold transition-colors"
@@ -470,10 +489,10 @@ export const StockIssueListView: React.FC = () => {
                       ) : (
                         <span
                           className="flex items-center gap-1 px-2 py-1 text-slate-400 border border-slate-200 rounded-md text-2xs cursor-not-allowed"
-                          title="Không có quyền chỉnh sửa phiếu xuất"
+                          title={`Chỉ tài khoản lập phiếu (${issue.createdByName || 'người tạo'}) hoặc Admin được chỉnh sửa`}
                         >
-                          <Edit2 className="w-3.5 h-3.5" />
-                          <span>Khóa sửa</span>
+                          <Lock className="w-3 h-3" />
+                          <span>Chỉ người tạo</span>
                         </span>
                       )}
 
@@ -485,7 +504,7 @@ export const StockIssueListView: React.FC = () => {
                         <Printer className="w-4 h-4" />
                       </button>
 
-                      {canDeleteIssue && (
+                      {canDeleteRow && (
                         <button
                           onClick={() => handleDelete(issue)}
                           className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-md transition-colors"
@@ -501,6 +520,7 @@ export const StockIssueListView: React.FC = () => {
             })}
           </tbody>
         </table>
+        </div>
       </div>
 
       {/* Modal Lập / Hiệu Chỉnh Phiếu Xuất Kho */}

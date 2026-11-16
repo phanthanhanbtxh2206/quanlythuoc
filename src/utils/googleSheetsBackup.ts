@@ -4,13 +4,112 @@
  */
 
 import * as XLSX from 'xlsx';
-import { Beneficiary, StockReceipt, StockIssue, Medicine, StockTransaction, TemplateSettings } from '../types';
+import { Beneficiary, StockReceipt, StockIssue, Medicine, StockTransaction, TemplateSettings, User, UserRole, UserStatus } from '../types';
 
-export interface ThreeSheetsData {
+export interface FourSheetsData {
   receiptSheetRows: any[];
   issueSheetRows: any[];
   reportSheetRows: any[];
+  accountSheetRows: any[];
 }
+
+export const buildUsersAccountSheetRows = (users: User[]) => {
+  return (users || []).map((u, idx) => ({
+    'STT': idx + 1,
+    'ID tài khoản': u.id,
+    'Họ và tên': u.fullName,
+    'Email đăng nhập': u.email,
+    'Mật khẩu': u.password || '',
+    'Số điện thoại': u.phone || '',
+    'Phòng ban / Đơn vị': u.department,
+    'Vai trò': u.role,
+    'Trạng thái': u.status,
+    'Ngày tạo': u.createdAt || '',
+    'Ngày duyệt': u.approvedAt || '',
+    'Người duyệt': u.approvedBy || '',
+  }));
+};
+
+const normalizeRole = (raw: string): UserRole => {
+  const val = (raw || '').trim().toUpperCase();
+  if (val === 'ADMIN' || val.includes('QUẢN TRỊ')) return 'ADMIN';
+  if (val === 'PHARMACIST' || val.includes('DƯỢC')) return 'PHARMACIST';
+  if (val === 'DOCTOR' || val.includes('BÁC SĨ') || val.includes('Y SĨ')) return 'DOCTOR';
+  if (val === 'ACCOUNTANT' || val.includes('KẾ TOÁN')) return 'ACCOUNTANT';
+  if (val === 'LEADER' || val.includes('LÃNH ĐẠO')) return 'LEADER';
+  return 'DOCTOR';
+};
+
+const normalizeStatus = (raw: string): UserStatus => {
+  const val = (raw || '').trim().toUpperCase();
+  if (val === 'ACTIVE' || val.includes('HOẠT ĐỘNG')) return 'ACTIVE';
+  if (val === 'PENDING_APPROVAL' || val.includes('CHỜ')) return 'PENDING_APPROVAL';
+  if (val === 'LOCKED' || val.includes('KHÓA')) return 'LOCKED';
+  if (val === 'DISABLED' || val.includes('NGƯNG')) return 'DISABLED';
+  if (val === 'REJECTED' || val.includes('TỪ CHỐI')) return 'REJECTED';
+  return 'PENDING_APPROVAL';
+};
+
+/**
+ * Parse 2D array from Google Sheets tab "Tài khoản" back into User[]
+ */
+export const parseUsersFromAccountSheet = (rows2D: any[][], fallbackUsers: User[] = []): User[] => {
+  if (!Array.isArray(rows2D) || rows2D.length < 2) {
+    return fallbackUsers;
+  }
+
+  const headers = rows2D[0].map((h) => String(h || '').trim().toLowerCase());
+  const findCol = (keywords: string[]) =>
+    headers.findIndex((h) => keywords.some((kw) => h.includes(kw)));
+
+  const colId = findCol(['id tài khoản', 'id']);
+  const colName = findCol(['họ và tên', 'tên']);
+  const colEmail = findCol(['email']);
+  const colPassword = findCol(['mật khẩu', 'password']);
+  const colPhone = findCol(['điện thoại', 'phone', 'sđt']);
+  const colDept = findCol(['phòng ban', 'đơn vị', 'department']);
+  const colRole = findCol(['vai trò', 'role']);
+  const colStatus = findCol(['trạng thái', 'status']);
+  const colCreated = findCol(['ngày tạo', 'created']);
+  const colApprovedAt = findCol(['ngày duyệt']);
+  const colApprovedBy = findCol(['người duyệt']);
+
+  const parsed: User[] = [];
+  for (let i = 1; i < rows2D.length; i++) {
+    const row = rows2D[i];
+    if (!Array.isArray(row)) continue;
+
+    const email = colEmail >= 0 ? String(row[colEmail] || '').trim() : '';
+    const fullName = colName >= 0 ? String(row[colName] || '').trim() : '';
+    if (!email && !fullName) continue;
+
+    const id = (colId >= 0 ? String(row[colId] || '').trim() : '') || `usr-sheet-${i}`;
+    const existing = fallbackUsers.find(
+      (u) => u.id === id || (email && u.email.toLowerCase() === email.toLowerCase())
+    );
+
+    const passwordVal = colPassword >= 0 ? String(row[colPassword] || '').trim() : '';
+
+    parsed.push({
+      id,
+      fullName: fullName || existing?.fullName || email,
+      email: email || existing?.email || '',
+      password: passwordVal || existing?.password || '123',
+      phone: colPhone >= 0 ? String(row[colPhone] || '').trim() : existing?.phone || '',
+      department:
+        (colDept >= 0 ? String(row[colDept] || '').trim() : '') ||
+        existing?.department ||
+        'Phòng Y tế - Phục hồi chức năng',
+      role: colRole >= 0 ? normalizeRole(String(row[colRole] || '')) : existing?.role || 'DOCTOR',
+      status: colStatus >= 0 ? normalizeStatus(String(row[colStatus] || '')) : existing?.status || 'PENDING_APPROVAL',
+      createdAt: (colCreated >= 0 ? String(row[colCreated] || '').trim() : '') || existing?.createdAt || '',
+      approvedAt: colApprovedAt >= 0 ? String(row[colApprovedAt] || '').trim() || undefined : existing?.approvedAt,
+      approvedBy: colApprovedBy >= 0 ? String(row[colApprovedBy] || '').trim() || undefined : existing?.approvedBy,
+    });
+  }
+
+  return parsed.length > 0 ? parsed : fallbackUsers;
+};
 
 /**
  * Build the 3-sheet structured data where on every sheet,
@@ -387,12 +486,27 @@ export const buildThreeSheetsBeneficiaryData = (
   };
 };
 
+export const buildFourSheetsData = (
+  beneficiaries: Beneficiary[],
+  receipts: StockReceipt[],
+  issues: StockIssue[],
+  medicines: Medicine[],
+  transactions: StockTransaction[],
+  users: User[]
+): FourSheetsData => {
+  const base = buildThreeSheetsBeneficiaryData(beneficiaries, receipts, issues, medicines, transactions);
+  return {
+    ...base,
+    accountSheetRows: buildUsersAccountSheetRows(users),
+  };
+};
+
 /**
- * Download a true native Excel (.XLSX) workbook with 3 sheets:
+ * Download a true native Excel (.XLSX) workbook with 4 sheets:
  * 1. Sheet "Phiếu nhập"
  * 2. Sheet "Phiếu xuất"
  * 3. Sheet "Báo cáo"
- * On each sheet, each row is a dedicated beneficiary.
+ * 4. Sheet "Tài khoản"
  */
 export const downloadThreeSheetsExcelWorkbook = (
   beneficiaries: Beneficiary[],
@@ -400,14 +514,16 @@ export const downloadThreeSheetsExcelWorkbook = (
   issues: StockIssue[],
   medicines: Medicine[],
   transactions: StockTransaction[],
-  templateSettings: TemplateSettings
+  templateSettings: TemplateSettings,
+  users: User[] = []
 ) => {
-  const { receiptSheetRows, issueSheetRows, reportSheetRows } = buildThreeSheetsBeneficiaryData(
+  const { receiptSheetRows, issueSheetRows, reportSheetRows, accountSheetRows } = buildFourSheetsData(
     beneficiaries,
     receipts,
     issues,
     medicines,
-    transactions
+    transactions,
+    users
   );
 
   const workbook = XLSX.utils.book_new();
@@ -416,6 +532,7 @@ export const downloadThreeSheetsExcelWorkbook = (
   const wsReceipt = XLSX.utils.json_to_sheet(receiptSheetRows);
   const wsIssue = XLSX.utils.json_to_sheet(issueSheetRows);
   const wsReport = XLSX.utils.json_to_sheet(reportSheetRows);
+  const wsAccount = XLSX.utils.json_to_sheet(accountSheetRows);
 
   // Auto column widths
   const setCols = (ws: XLSX.WorkSheet) => {
@@ -455,22 +572,36 @@ export const downloadThreeSheetsExcelWorkbook = (
     { wch: 16 },
     { wch: 18 },
   ];
+  wsAccount['!cols'] = [
+    { wch: 6 },
+    { wch: 18 },
+    { wch: 24 },
+    { wch: 26 },
+    { wch: 14 },
+    { wch: 14 },
+    { wch: 28 },
+    { wch: 14 },
+    { wch: 18 },
+    { wch: 14 },
+    { wch: 14 },
+    { wch: 20 },
+  ];
 
-  // Append 3 sheets with exact requested names
+  // Append all 4 sheets with exact requested names
   XLSX.utils.book_append_sheet(workbook, wsReceipt, 'Phiếu nhập');
   XLSX.utils.book_append_sheet(workbook, wsIssue, 'Phiếu xuất');
   XLSX.utils.book_append_sheet(workbook, wsReport, 'Báo cáo');
+  XLSX.utils.book_append_sheet(workbook, wsAccount, 'Tài khoản');
 
   // Generate binary and trigger download
   const dateStr = new Date().toISOString().split('T')[0];
-  const fileName = `SaoLuu_GoogleSheets_TTBTXH_3Sheet_${dateStr}.xlsx`;
+  const fileName = `SaoLuu_GoogleSheets_TTBTXH_4Sheet_${dateStr}.xlsx`;
 
   XLSX.writeFile(workbook, fileName);
 };
 
 /**
- * Generate UTF-8 BOM CSV representation with 3 distinct sheet sections
- * where each beneficiary sits on one line.
+ * Generate UTF-8 BOM CSV representation with 4 distinct sheet sections
  */
 export const downloadThreeSheetsCSV = (
   beneficiaries: Beneficiary[],
@@ -478,14 +609,16 @@ export const downloadThreeSheetsCSV = (
   issues: StockIssue[],
   medicines: Medicine[],
   transactions: StockTransaction[],
-  templateSettings: TemplateSettings
+  templateSettings: TemplateSettings,
+  users: User[] = []
 ) => {
-  const { receiptSheetRows, issueSheetRows, reportSheetRows } = buildThreeSheetsBeneficiaryData(
+  const { receiptSheetRows, issueSheetRows, reportSheetRows, accountSheetRows } = buildFourSheetsData(
     beneficiaries,
     receipts,
     issues,
     medicines,
-    transactions
+    transactions,
+    users
   );
 
   const convertRowsToCsv = (rows: any[]) => {
@@ -505,10 +638,9 @@ export const downloadThreeSheetsCSV = (
 
   const csvContent = [
     `# =========================================================================`,
-    `# SAO LƯU GOOGLE SHEETS TỐI ƯU 03 SHEET - TRUNG TÂM BẢO TRỢ XÃ HỘI ĐÀ NẴNG`,
-    `# Cơ quan: ${templateSettings.agencyName} - Mã QHNS: ${templateSettings.qhnsCode}`,
+    `# SAO LƯU GOOGLE SHEETS 04 SHEET - TRUNG TÂM BẢO TRỢ XÃ HỘI ĐÀ NẴNG`,
+    `# Cơ quan chủ quản: ${templateSettings.parentOrg} | Đơn vị: ${templateSettings.agencyName} - Mã QHNS: ${templateSettings.qhnsCode}`,
     `# Ngày xuất: ${new Date().toLocaleString('vi-VN')}`,
-    `# Quy tắc: Tại mỗi sheet, mỗi tên đối tượng nằm trên một dòng riêng biệt`,
     `# =========================================================================`,
     '',
     '# >>> SHEET 1: PHIẾU NHẬP (DANH SÁCH ĐỐI TƯỢNG HƯỞNG THUỐC NHẬP KHO) <<<',
@@ -519,6 +651,9 @@ export const downloadThreeSheetsCSV = (
     '',
     '# >>> SHEET 3: BÁO CÁO (BẢNG TỔNG HỢP NHẬP, XUẤT THUỐC MUA NGOÀI CHO ĐỐI TƯỢNG CÓ BHYT) <<<',
     convertRowsToCsv(reportSheetRows),
+    '',
+    '# >>> SHEET 4: TÀI KHOẢN (DANH SÁCH CÁN BỘ & PHÂN QUYỀN TRUY CẬP) <<<',
+    convertRowsToCsv(accountSheetRows),
   ].join('\n');
 
   const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' });
@@ -526,7 +661,7 @@ export const downloadThreeSheetsCSV = (
   const link = document.createElement('a');
   link.href = url;
   const dateStr = new Date().toISOString().split('T')[0];
-  link.setAttribute('download', `SaoLuu_GoogleSheets_TTBTXH_3Sheet_${dateStr}.csv`);
+  link.setAttribute('download', `SaoLuu_GoogleSheets_TTBTXH_4Sheet_${dateStr}.csv`);
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
